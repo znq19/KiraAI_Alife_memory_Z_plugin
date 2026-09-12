@@ -110,17 +110,17 @@ DEDUPE_CONSERVATIVE_INSTRUCTION = (
 COMPACT_SCHEMAS = {
     "compress": (
         '返回 JSON（无 markdown、无额外字段）：\n'
-        '{"summary": str, "range": {"start": iso, "end": iso},\n'
-        ' "records": [{"id": str, "summary": str}],\n'
+        '{"summary": str,\n'
         ' "facts": [{"category": "<枚举见上>", "subject": str, "content": str,\n'
         '            "reason": str, "scenario": str, "tags": [str],\n'
         '            "relations": [{"subject","predicate","object"}],\n'
         '            "source_ids": [str], "importance": 1-10}]}\n'
+        '**只有这两个顶层键**（summary、facts）—— 不要回写输入里的 range/records/names 等字段 ✗\n'
         '必填：summary；facts 里 category/subject/content/reason/scenario/tags/relations/source_ids。\n'
         '上限：facts ≤12、content ≤60 字、reason ≤40 字、scenario ≤20 字、summary ≤300 字。\n'
         '字段白名单：只允许上面出现过的键，多任何一个都会被拒。\n'
         '常见错误（会被拒）：把 predicate/object 平铺进事实（必须放 relations）；\n'
-        'source_ids 编造或漏抄；content 为空。'
+        'source_ids 编造或漏抄；content 为空；多写 range/records 等输入字段。'
     ),
     "fact_merge": (
         '返回 JSON（无 markdown、无额外字段）：\n'
@@ -555,7 +555,10 @@ class Engine:
         retries = cfg.model_retries if retry_timeout else 0
         for attempt in range(retries + 1):
             if attempt >= 2 and isinstance(schema, str):
-                # 兜底：紧凑声明连续被拒两次 → 用完整自动 schema 重试（最坏 = 旧成本）
+                # 兜底：紧凑声明连续被拒两次 → 换成完整自动 schema（最坏 = 旧成本）
+                # 注意：要跑到这里需要 model_retries >= 2 ✓（重试预算的语义不动 ——
+                # 有测试锁着 ✓）；本次 extra_forbidden 事故的真凶是模板写错字段名，
+                # 已由 test_compact_schema_does_not_invent_fields 钉住 ✓
                 schema = strip_schema_titles(contract.model_json_schema())
             try:
                 text = await asyncio.wait_for(

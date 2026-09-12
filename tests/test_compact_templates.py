@@ -74,7 +74,7 @@ def test_compact_schema_is_much_smaller_than_auto_schema():
 def test_compact_schema_falls_back_to_full_schema():
     """连续被拒要有兜底（否则省钱的代价是白跑 ✗）。"""
     source = (ROOT / "engine.py").read_text(encoding="utf-8")
-    assert "attempt >= 2 and isinstance(schema, str)" in source
+    assert "if attempt >= 2 and isinstance(schema, str):" in source
     assert "strip_schema_titles(contract.model_json_schema())" in source
     # 提示词组装要支持字符串形式的 schema
     main = (ROOT / "main.py").read_text(encoding="utf-8")
@@ -111,3 +111,53 @@ def test_compact_schema_forbids_extra_keys():
     """
     for purpose, text in engine.COMPACT_SCHEMAS.items():
         assert "字段白名单" in text, purpose
+
+
+def _mentioned_keys(text):
+    import re
+
+    return set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)":', text))
+
+
+def test_compact_schema_does_not_invent_fields():
+    """紧凑声明里出现的每个键，契约里必须真的存在 ✗ —— 这条是线上事故的直接教训。
+
+    v2.16.0 的 compress 模板里我写了 range / records（那是**输入** payload 的字段 ✗），
+    模型照着模板多给两个键 → extra_forbidden ×2 → **每次压缩都失败** ✗✗
+    （当时的测试只查"必填字段有没有漏"，查不出"凭空多写了字段" ✗）
+    """
+    for purpose, model in (
+        ("compress", contracts.Compression),
+        ("fact_merge", contracts.FactMerge),
+        ("audit", contracts.Audit),
+    ):
+        allowed = _all_field_names(model)
+        invented = {
+            key for key in _mentioned_keys(engine.COMPACT_SCHEMAS[purpose]) if key not in allowed
+        }
+        assert not invented, "%s 的紧凑声明写了契约里没有的字段：%s" % (purpose, invented)
+
+
+def _all_field_names(model):
+    """契约里出现过的所有字段名（含嵌套模型与数组元素）。"""
+    names = {"str", "int", "iso", "id"}  # 模板里的类型占位符，不是字段
+
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        for key, child in (node.get("properties") or {}).items():
+            names.add(key)
+            walk(child)
+        for child in (node.get("$defs") or {}).values():
+            walk(child)
+        if "items" in node:
+            walk(node["items"])
+
+    walk(model.model_json_schema())
+    return names
+
+
+def test_fallback_needs_two_retries():
+    """兜底（退回完整自动 schema）需要 model_retries>=2 才跑得到 —— 语义不动（有测试锁着 ✓）。"""
+    source = (ROOT / "engine.py").read_text(encoding="utf-8")
+    assert "if attempt >= 2 and isinstance(schema, str):" in source
