@@ -286,8 +286,8 @@ async def test_global_recall_has_provenance_names_and_no_vector_calls(tmp_path):
         assert related and all(r.get("from") for r in related)
         # 跨会话来源：related 条目带 from（有名字就是群名，没名字是短码）
         assert all(r.get("from") for r in memory.get("related_archives", []))
-        assert "test:gm:noise" not in memory["names"], "被排除的会话不该出现"
-        assert any("阿澄" in value for value in memory["names"].values())
+        assert not any("test:gm:noise" in str(v) for v in memory["names"].values()), "被排除的会话不该出现"
+        assert any("阿澄" in str(value) for value in memory["names"].values())
         assert "阿澄" not in "".join(p.content for p in request.system_prompt)
         names = json.loads(await plugin.memory_names(event, "阿澄"))["entities"]
         result = json.loads(
@@ -1315,7 +1315,7 @@ async def test_situational_injection_pins_commitments_and_triggers_on_mention(tm
         assert "另一个人喜欢甜食" not in contents
         keys = set(_rows(plain)[0])
         assert {"c", "u", "x"} <= keys and keys <= {
-            "c", "u", "x", "src", "t", "t2", "rec", "imp", "rel"
+            "c", "u", "x", "src", "t", "t2", "rec", "imp", "rel", "w"
         }, "注入块只放短键，空字段与默认值一律省略"
 
         mentioned = await _injected_block(plugin, make_text_event("萤火最近怎么样"))

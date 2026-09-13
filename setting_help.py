@@ -1,6 +1,7 @@
 """Shared plain-language help for the host settings page and sidebar."""
 
 HELP = {
+    "fact_view": "事实在上下文里的呈现方式：grouped（默认）按主体分组、组内位置固定，最省 token；flat 是旧的扁平 JSON 格式，兼容用。",
     "enabled": "总开关。关闭后暂停记录、召回和后台整理，已有记忆保留。",
     "capture_enabled": "把新对话、图片识别等感知结果写进记忆；关闭后仍可查旧记忆。",
     "bootstrap_seed": "首次遇到旧会话时，是否把 KiraAI 已有的对话历史抄进记忆库。auto（默认）检测到会话合并/压缩插件时跳过，避免把别的会话记成本会话；always 始终播种；off 从不播种。",

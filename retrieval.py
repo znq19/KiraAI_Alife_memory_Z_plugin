@@ -876,8 +876,8 @@ def bot_facts_grouped(facts, current_sid="", codes=None):
         groups.setdefault(key, []).append((CATEGORY_RANK.get(fact.get("category") or "", 99), _grouped_row(fact, codes, current_sid)))
         ranks[key] = min(ranks.get(key, 99), CATEGORY_RANK.get(fact.get("category") or "", 99))
     out = {}
-    for key in sorted(groups, key=lambda k: (ranks.get(k, 99), k)):
-        rows = [row for _, row in sorted(groups[key], key=lambda pair: pair[0])]
+    for key in groups:  # 保持上游顺序（提到的人/高相关在前）
+        rows = [row for _, row in groups[key]]
         out[key] = rows
     return out
 
