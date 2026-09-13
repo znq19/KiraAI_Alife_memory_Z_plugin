@@ -267,6 +267,7 @@ class Settings(Strict):
     bootstrap_seed: Literal["auto", "always", "off"] = "auto"
     inject_recent_raw: bool = False
     auto_inject: bool = True
+    fact_view: Literal["grouped", "flat"] = "grouped"
     threshold: int = Field(default=50, ge=4, le=10000)
     batch_size: int = Field(default=40, ge=2, le=9999)
     probability: float = Field(default=0.8, ge=0, le=1)

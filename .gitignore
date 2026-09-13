@@ -4,3 +4,5 @@ __pycache__/
 *.sqlite3*
 .venv/
 data/
+demo_*.py
+AUDIT_*.md

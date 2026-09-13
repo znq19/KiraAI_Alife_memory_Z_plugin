@@ -44,6 +44,10 @@ from .storage import Conflict, Store
 from .migration import SOURCES, newest_legacy_mtime
 from .retrieval import (
     CATEGORY_RANK,
+    archives_flat,
+    FACT_VIEW_GROUPED,
+    pack_facts,
+    short_names,
     SYNTHETIC_NAMES,
     clean_text,
     short_time,
@@ -1631,13 +1635,22 @@ class AlifeMemoryPlugin(BasePlugin):
             else:
                 omitted.append(row["id"])
         selected = [chosen[r["id"]] for r in rows if r["id"] in chosen]
+        if getattr(self.settings, "fact_view", FACT_VIEW_GROUPED) == FACT_VIEW_GROUPED:
+            _perm, _recent = [], []
+            for _row in selected:
+                (_perm if _row.pop("mem", None) else _recent).append(_row)
+            selected = {"permanent": _perm, "recent": _recent}
         # P1：召回时顺便发现重复事实（本地判定 → 只标记 → 后台合并）
         dropped = await self.queue_recall_merges(sid, facts)
         if dropped:
             facts = [fact for fact in facts if fact["id"] not in dropped]
         with_evidence = await self.store.call("attach_evidence", facts)
         fact_shorts = await self.shortmap(
-            f.get("src") for f in with_evidence if f.get("src")
+            [v for f in with_evidence for v in (f.get("src"), f.get("subject"), f.get("sid"))
+                if v]
+            + [x for f in with_evidence
+               for rel in (f.get("verified_relations") or f.get("relations") or [])
+               if isinstance(rel, dict) for x in (rel.get("subject"), rel.get("object")) if x]
         )
         # 短码 → 真实 id：注入块与 seen 窗口需要真实 id
         real_of = {short: real for real, short in archive_shorts.items()}
@@ -1649,7 +1662,11 @@ class AlifeMemoryPlugin(BasePlugin):
             "scope": cfg.recall_scope,
             "session": sid,
             "self": getattr(event, "self_id", ""),
-            "facts": bot_facts(with_evidence, sid, short=fact_shorts.get),
+            "facts": pack_facts(
+            with_evidence, sid, short=fact_shorts.get,
+            view=getattr(self.settings, "fact_view", None) or FACT_VIEW_GROUPED,
+            codes=fact_shorts,
+        ),
         }
         if users:
             perception["participants"] = users
@@ -1671,7 +1688,9 @@ class AlifeMemoryPlugin(BasePlugin):
             label = label_of.get(raw_row["sid"])
             if label:
                 item["from"] = label
-        if names:
+        if names and getattr(self.settings, "fact_view", FACT_VIEW_GROUPED) == FACT_VIEW_GROUPED:
+            perception["names"] = short_names(names, fact_shorts)
+        elif names:
             perception["names"] = {
                 item["id"]: "|".join([item["name"], *item.get("aliases", [])]).strip("|")
                 for item in names
@@ -1702,6 +1721,8 @@ class AlifeMemoryPlugin(BasePlugin):
             content = dump(perception)
         for key in ("names", "related_archives", "omitted_ids"):
             while len(content) > cfg.context_chars and perception.get(key):
+                if isinstance(perception.get(key), dict):
+                    perception[key] = archives_flat(perception[key])
                 perception[key].pop()
                 content = dump(perception)
         related_now = perception.get("related_archives", [])
@@ -1714,7 +1735,8 @@ class AlifeMemoryPlugin(BasePlugin):
         self.seen_window.remember(
             recall_key,
             "",
-            [real_of.get(r.get("a"), r.get("a")) for r in perception.get("archives", [])]
+            [real_of.get(r.get("a"), r.get("a"))
+             for r in archives_flat(perception.get("archives"))]
             + [
                 real_of.get(r.get("a"), r.get("a"))
                 for r in perception.get("related_archives", [])
@@ -2265,8 +2287,13 @@ class AlifeMemoryPlugin(BasePlugin):
                 "totals": totals,
                 "already_seen": len(seen),
                 "subjects": sorted({r["subject"] for r in rows}),
-                "facts": bot_facts(
-                    await self.store.call("attach_evidence", rows), event.sid
+                "facts": pack_facts(
+                    await self.store.call("attach_evidence", rows),
+                    event.sid,
+                    view=getattr(self.settings, "fact_view", None) or FACT_VIEW_GROUPED,
+                    codes=await self.shortmap(
+                        [v for r in rows for v in (r.get("subject"),)]
+                    ),
                 ),
                 "next_offset": offset + len(rows),
             },

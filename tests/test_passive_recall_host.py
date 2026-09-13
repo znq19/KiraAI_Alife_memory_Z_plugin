@@ -109,7 +109,7 @@ async def test_passive_recall_brings_fact_by_content_only(tmp_path):
     try:
         event = make_event()
         add_fact(plugin, event.sid, "relationship", "test:u", "我师傅是星月")
-        assert '"x":"我师傅是星月"' in await inject(plugin, event, "你师傅是谁")
+        assert '"我师傅是星月"' in await inject(plugin, event, "你师傅是谁")
     finally:
         await plugin.terminate()
 
@@ -123,7 +123,7 @@ async def test_recall_threshold_is_configurable(tmp_path):
         event = make_event()
         # 主体不是发言人：排除实体通道（消息文本里带昵称「小明」），只考验内容匹配
         add_fact(plugin, event.sid, "event", "test:v", "师傅上周来工作室看了作品")
-        mark = '"x":"师傅上周来工作室看了作品"'
+        mark = '"师傅上周来工作室看了作品"'
         assert mark in await inject(plugin, event, "你师傅是谁")
         plugin.settings.fact_recall_min_score = 4
         assert mark not in await inject(plugin, event, "你师傅是谁")
@@ -163,7 +163,7 @@ async def test_soft_deleted_fact_and_cold_archive_stay_out(tmp_path):
         add_fact(plugin, event.sid, "relationship", "test:u", "我师傅是星月")
         fact = plugin.store.facts(event.sid, global_scope=True, users=["test:u"])[0]
         plugin.store.edit("fact", fact["id"], fact["revision"], {"deleted": True}, "撤回")
-        assert '"x":"我师傅是星月"' not in await inject(plugin, event, "你师傅是谁")
+        assert '"我师傅是星月"' not in await inject(plugin, event, "你师傅是谁")
 
         perm = plugin.store.memorize(event.sid, "我师傅是星月", ["test:u"], 3.0, 3.0)
         kept = plugin.store.memorize(event.sid, "今天天气不错", ["test:u"], 4.0, 4.0)

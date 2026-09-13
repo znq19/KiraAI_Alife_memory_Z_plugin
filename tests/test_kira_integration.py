@@ -14,6 +14,22 @@ if not CORE:
     pytest.skip("set KIRA_CORE for actual host integration", allow_module_level=True)
 sys.path.insert(0, str(Path(CORE).resolve()))
 ROOT = Path(__file__).resolve().parents[1]
+def _rows(payload):
+    """兼容 v2.17.0 分组视图（facts 是 dict）与旧扁平视图（list）：统一成行 dict。"""
+    facts = payload["facts"]
+    if not isinstance(facts, dict):
+        return facts
+    out = []
+    for code, rows in facts.items():
+        for row in rows:
+            item = {"u": code, "c": row[0], "x": row[1]}
+            for index, key in ((2, "imp"), (3, "rel"), (4, "t"), (5, "w")):
+                if len(row) > index and row[index] != "":
+                    item[key] = row[index]
+            out.append(item)
+    return out
+
+
 package = types.ModuleType("alife_host_test")
 package.__path__ = [str(ROOT)]
 sys.modules.setdefault("alife_host_test", package)
@@ -193,10 +209,16 @@ async def test_followup_facts_excluded_before_limit(tmp_path):
         first = json.loads(await plugin.overview(event))
         second = json.loads(await plugin.overview(event))
         # MemoryOverview 每次最多返回 50 条新事实：先排除已送达的，再截断。
-        assert len(first["facts"]) == 50 and first["already_seen"] == 0
-        assert len(second["facts"]) == 5 and second["already_seen"] == 50
+        def _total(payload):
+            facts = payload["facts"]
+            if isinstance(facts, dict):  # v2.17.0：按主体分组
+                return sum(len(rows) for rows in facts.values())
+            return len(facts)
+
+        assert _total(first) == 50 and first["already_seen"] == 0
+        assert _total(second) == 5 and second["already_seen"] == 50
         third = json.loads(await plugin.overview(event))
-        assert third["facts"] == [] and third["already_seen"] == 55
+        assert _total(third) == 0 and third["already_seen"] == 55
     finally:
         await plugin.terminate()
 
@@ -264,8 +286,8 @@ async def test_global_recall_has_provenance_names_and_no_vector_calls(tmp_path):
         assert related and all(r.get("from") for r in related)
         # 跨会话来源：related 条目带 from（有名字就是群名，没名字是短码）
         assert all(r.get("from") for r in memory.get("related_archives", []))
-        assert "test:gm:noise" not in memory["names"], "被排除的会话不该出现"
-        assert any("阿澄" in value for value in memory["names"].values())
+        assert not any("test:gm:noise" in str(v) for v in memory["names"].values()), "被排除的会话不该出现"
+        assert any("阿澄" in str(value) for value in memory["names"].values())
         assert "阿澄" not in "".join(p.content for p in request.system_prompt)
         names = json.loads(await plugin.memory_names(event, "阿澄"))["entities"]
         result = json.loads(
@@ -584,7 +606,7 @@ async def test_safe_migration_disables_after_commit_and_yields_to_user_switch(tm
         )
         assert any(
             "Sunday" in f["x"]
-            for f in json.loads(await plugin.overview(event))["facts"]
+            for f in _rows(json.loads(await plugin.overview(event)))
         )
         assert (root / "core.txt").read_bytes() == original
         # Re-enabling a legacy plugin is a user choice, not a disable-loop trigger.
@@ -1287,17 +1309,17 @@ async def test_situational_injection_pins_commitments_and_triggers_on_mention(tm
                   "另一个人喜欢甜食", 6, record["id"])
 
         plain = await _injected_block(plugin, event)
-        contents = [f["x"] for f in plain["facts"]]
+        contents = [f["x"] for f in _rows(plain)]
         assert "周六下午三点在咖啡馆见面" in contents       # 约定常驻
         assert "萤火上周去看了猫" not in contents           # 没提到就不带
         assert "另一个人喜欢甜食" not in contents
-        keys = set(plain["facts"][0])
+        keys = set(_rows(plain)[0])
         assert {"c", "u", "x"} <= keys and keys <= {
-            "c", "u", "x", "src", "t", "t2", "rec", "imp", "rel"
+            "c", "u", "x", "src", "t", "t2", "rec", "imp", "rel", "w"
         }, "注入块只放短键，空字段与默认值一律省略"
 
         mentioned = await _injected_block(plugin, make_text_event("萤火最近怎么样"))
-        contents = [f["x"] for f in mentioned["facts"]]
+        contents = [f["x"] for f in _rows(mentioned)]
         assert "萤火上周去看了猫" in contents               # 提到人 → 带回关于他的事
         assert "另一个人喜欢甜食" not in contents
     finally:
@@ -1317,7 +1339,7 @@ async def test_full_mode_keeps_legacy_injection(tmp_path):
         _add_fact(plugin, event.sid, "test:other", "event",
                   "另一个人喜欢甜食", 6, record["id"])
         block = await _injected_block(plugin, event)
-        assert "另一个人喜欢甜食" in [f["x"] for f in block["facts"]]
+        assert "另一个人喜欢甜食" in [f["x"] for f in _rows(block)]
     finally:
         await plugin.terminate()
 

@@ -531,8 +531,8 @@ def short_time(value):
         ts = float(value)
     except (TypeError, ValueError):
         return ""
-    if ts <= 0:
-        return ""
+    if ts <= 0 or ts < 946684800 or ts > 4102444800:
+        return ""  # 非法/越界时间一律留空（绝不渲染 1970-01-01）✗
     stamp = time.localtime(ts)
     if stamp.tm_year == time.localtime().tm_year:
         return time.strftime("%m-%d %H:%M", stamp)
@@ -692,9 +692,12 @@ def relevance(query, text):
 def short_day(ts):
     """给模型看的日期短码：今年不带年，跨年才带（省 token，且一眼能读）。"""
     try:
-        stamp = time.localtime(float(ts))
-    except (TypeError, ValueError, OSError):
+        stamp_value = float(ts)
+    except (TypeError, ValueError):
         return ""
+    if stamp_value < 946684800 or stamp_value > 4102444800:
+        return ""  # 2000~2100 年之外（含 0/负数/毫秒戳）一律视为缺失：绝不渲染 1970-01-01 ✗
+    stamp = time.localtime(stamp_value)
     now = time.localtime()
     if stamp.tm_year == now.tm_year:
         return time.strftime("%m-%d", stamp)
@@ -805,3 +808,113 @@ def bot_facts(facts, current_sid="", short=None):
         view.append(item)
     return view
 
+
+# ── v2.17.0：事实「按主体分组」视图（默认）──────────────────────────────
+# 旧的扁平视图 bot_facts() 一律不动 ✓ 它是回滚路径（view="flat" 时逐字节一致 ✓）
+# 组内位置固定：[类别, 内容, 重要性?, 关系?, 时间?, 谁说的?] ✓ 尾部为空就省略 ✗
+# 注意：只允许从**尾部**省 —— 中间位有值、前一位没有时，前一位补 "" 占位 ✓
+
+FACT_VIEW_GROUPED = "grouped"
+FACT_VIEW_FLAT = "flat"
+
+
+def _grouped_row(fact, codes, current_sid):
+    """一条事实 → 位置化行（尾部省略）。"""
+    category = fact.get("category") or ""
+    row = [CATEGORY_CODES.get(category, category), str(fact.get("content") or "")]
+
+    importance = fact.get("importance")
+    row.append(importance if importance not in (None, "", 5) else "")
+
+    rels = []
+    for rel in fact.get("verified_relations") or fact.get("relations") or []:
+        if not isinstance(rel, dict):
+            continue
+        head = codes.get(str(rel.get("subject") or ""), str(rel.get("subject") or ""))
+        tail = codes.get(str(rel.get("object") or ""), str(rel.get("object") or ""))
+        rels.append("%s>%s>%s" % (head, rel.get("predicate") or "", tail))
+    row.append(";".join(rels))
+
+    event_at = fact.get("event_at")
+    label = short_day(event_at) if event_at else ""
+    event_end = fact.get("event_end")
+    if label and event_end:
+        end = short_day(event_end)
+        if end and end != label:
+            label = "%s~%s" % (label, end)
+    row.append(label)
+
+    speaker = codes.get(str(fact.get("src_user") or ""), "")
+    room = str(fact.get("sid") or "")
+    who = speaker
+    if room and current_sid and room != current_sid:
+        who = "%s@%s" % (speaker, codes.get(room, room)) if speaker else "@" + codes.get(room, room)
+    row.append(who)
+
+    while row and row[-1] == "":
+        row.pop()
+    return row
+
+
+def bot_facts_grouped(facts, current_sid="", codes=None):
+    """按主体分组渲染事实（v2.17.0 默认视图）。
+
+    形如::
+
+        {"n1": [["pf", "周武是用户的大学室友", 7, "n1>朋友>n2", "08-20"]],
+         "n2": [["ev", "昨天和周武一起吃饭", 6, "", "09-11"]]}
+
+    - 组键 = **主体短码**（真实 id 见 names 表 ✓）→ 主体只出现一次 ✓
+    - 组间/组内都沿用上游顺序（提到的人/高相关在前 ✓ 不要重排 ✗）
+    - 关系用短码三元组 "主体>关系>客体" ✓ 多条用 ";" 连接 ✓
+    """
+    codes = codes or {}
+    groups = {}
+    ranks = {}
+    for fact in facts or []:
+        subject = str(fact.get("subject") or "")
+        if not subject:
+            continue
+        key = codes.get(subject, subject)
+        groups.setdefault(key, []).append((CATEGORY_RANK.get(fact.get("category") or "", 99), _grouped_row(fact, codes, current_sid)))
+        ranks[key] = min(ranks.get(key, 99), CATEGORY_RANK.get(fact.get("category") or "", 99))
+    out = {}
+    for key in groups:  # 保持上游顺序（提到的人/高相关在前）
+        rows = [row for _, row in groups[key]]
+        out[key] = rows
+    return out
+
+
+def pack_facts(facts, current_sid="", short=None, view=FACT_VIEW_GROUPED, codes=None):
+    """事实渲染入口：grouped=分组视图（默认 ✓）/ flat=旧的扁平视图（逐字节不变 ✓）。"""
+    if view == FACT_VIEW_FLAT:
+        return bot_facts(facts, current_sid, short=short)
+    return bot_facts_grouped(facts, current_sid, codes=codes)
+
+
+def short_names(names, codes):
+    """{短码: [真实 id, "名字|别名"]} —— 分组视图下主体只给短码，名字在这里一次给全 ✓。"""
+    table = {}
+    for item in names or []:
+        real = item.get("id")
+        if not real:
+            continue
+        label = "|".join([item.get("name") or "", *(item.get("aliases") or [])]).strip("|")
+        table[codes.get(real, real)] = [real, label]
+    return table
+
+
+FACT_GROUP_LEGEND = (
+    "事实按主体分组：facts 的键是主体短码，组内每行 [类别, 内容, 重要性?, 关系?, 时间?, 谁说的?]，"
+    "尾部省略；关系写作 主体>关系>客体（多条用 ; 分隔）；短码与名字见 names（短码→[真实ID, 名字]）"
+)
+
+
+CATEGORY_LEGEND = CATEGORY_LEGEND + "\n" + FACT_GROUP_LEGEND
+
+
+def archives_flat(value):
+    """档案区取值：兼容「扁平列表」与「{permanent, recent} 分组」两种形态 ✓"""
+    if isinstance(value, dict):
+        return list(value.get("permanent") or []) + list(value.get("recent") or [])
+    return list(value or [])
