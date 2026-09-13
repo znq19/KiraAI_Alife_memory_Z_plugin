@@ -531,8 +531,8 @@ def short_time(value):
         ts = float(value)
     except (TypeError, ValueError):
         return ""
-    if ts <= 0:
-        return ""
+    if ts <= 0 or ts < 946684800 or ts > 4102444800:
+        return ""  # 非法/越界时间一律留空（绝不渲染 1970-01-01）✗
     stamp = time.localtime(ts)
     if stamp.tm_year == time.localtime().tm_year:
         return time.strftime("%m-%d %H:%M", stamp)
@@ -692,9 +692,12 @@ def relevance(query, text):
 def short_day(ts):
     """给模型看的日期短码：今年不带年，跨年才带（省 token，且一眼能读）。"""
     try:
-        stamp = time.localtime(float(ts))
-    except (TypeError, ValueError, OSError):
+        stamp_value = float(ts)
+    except (TypeError, ValueError):
         return ""
+    if stamp_value < 946684800 or stamp_value > 4102444800:
+        return ""  # 2000~2100 年之外（含 0/负数/毫秒戳）一律视为缺失：绝不渲染 1970-01-01 ✗
+    stamp = time.localtime(stamp_value)
     now = time.localtime()
     if stamp.tm_year == now.tm_year:
         return time.strftime("%m-%d", stamp)
@@ -862,7 +865,7 @@ def bot_facts_grouped(facts, current_sid="", codes=None):
          "n2": [["ev", "昨天和周武一起吃饭", 6, "", "09-11"]]}
 
     - 组键 = **主体短码**（真实 id 见 names 表 ✓）→ 主体只出现一次 ✓
-    - 组间/组内都按类别优先级排（画像/约定/偏好在前 ✓）
+    - 组间/组内都沿用上游顺序（提到的人/高相关在前 ✓ 不要重排 ✗）
     - 关系用短码三元组 "主体>关系>客体" ✓ 多条用 ";" 连接 ✓
     """
     codes = codes or {}
