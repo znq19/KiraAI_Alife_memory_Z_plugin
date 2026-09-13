@@ -193,8 +193,14 @@ async def test_followup_facts_excluded_before_limit(tmp_path):
         first = json.loads(await plugin.overview(event))
         second = json.loads(await plugin.overview(event))
         # MemoryOverview 每次最多返回 50 条新事实：先排除已送达的，再截断。
-        assert len(first["facts"]) == 50 and first["already_seen"] == 0
-        assert len(second["facts"]) == 5 and second["already_seen"] == 50
+        def _total(payload):
+            facts = payload["facts"]
+            if isinstance(facts, dict):  # v2.17.0：按主体分组
+                return sum(len(rows) for rows in facts.values())
+            return len(facts)
+
+        assert _total(first) == 50 and first["already_seen"] == 0
+        assert _total(second) == 5 and second["already_seen"] == 50
         third = json.loads(await plugin.overview(event))
         assert third["facts"] == [] and third["already_seen"] == 55
     finally:

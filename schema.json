@@ -591,6 +591,16 @@
         "name": "全局召回优先当前会话",
         "default": false,
         "description": "开启后，全局召回优先当前会话的记忆，其次同参与者，最后其他会话；只调整顺序，不缩小召回范围。默认关闭。"
+      },
+      "fact_view": {
+        "type": "enum",
+        "default": "grouped",
+        "options": [
+          "grouped",
+          "flat"
+        ],
+        "name": "事实视图",
+        "hint": "grouped=按主体分组（默认，省 token）；flat=旧扁平格式（兼容/回滚用）"
       }
     }
   }

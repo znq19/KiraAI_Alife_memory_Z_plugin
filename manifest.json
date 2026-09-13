@@ -1,7 +1,7 @@
 {
   "plugin_id": "alife_memory_z",
   "display_name": "Alife Memory Z",
-  "version": "2.16.4",
+  "version": "2.17.0",
   "author": "znq19",
   "repo": "https://github.com/znq19/KiraAI_Alife_memory_Z_plugin",
   "description": "基于 Alife 框架的记忆系统移植改造而成的长期分层记忆系统，前端可全热修改和监控。让每一段记忆都有来处，每一段故事都有归处。",
