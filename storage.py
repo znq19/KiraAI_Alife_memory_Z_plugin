@@ -131,12 +131,19 @@ def search_body_of(summary):
     return index_grams(summary) or NO_TOKENS
 
 
+LEXICAL_MAX_TOKENS = 256   # 词元上限（防病态长查询把召回拖慢；见下）
+
+
 def _lexical_sql(column, tokens):
     """把「词元命中 × 词长」的求和写成 SQL 表达式（纯 C 层，无 Python 回调）。
 
     与 relevance() 口径完全一致：score = Σ len(token)（命中即计入）。
     tokens 来自 query_tokens（只含字母数字与汉字），这里转义单引号后安全内联。
     """
+    # ⚠️ 词元上限：词元 = 查询里**每一个汉字切片** ⇒ 长文本可达上千 ✗
+    #    一是会把 SQL 表达式撑爆（见下），二是每行都要跑一遍全部 instr ✓ 很贵 ✓
+    #    取前 N 个（query_tokens 已排序 ⇒ 结果确定 ✓）；>N 的长查询极少见 ✓
+    tokens = list(tokens)[:LEXICAL_MAX_TOKENS]
     parts = []
     for token in tokens:
         literal = "'" + str(token).replace("'", "''") + "'"
@@ -148,7 +155,17 @@ def _lexical_sql(column, tokens):
     #   ORDER BY 0+0 → ✓ 只有写成"表达式"才安全
     # 触发场景很常见：一条纯表情/纯符号消息（如「🤔」）经词面召回传进来 ✓
     # （2026-09-17 用户在群里实测崩过 ✓ 本行即修复 ✓）
-    return " + ".join(parts) if parts else "0+0"
+    if not parts:
+        return "0+0"
+    # ★ 平衡合并（两两相加）⇒ 深度 O(log n) ✓，且**求值结果与顺序求和逐值一致** ✓
+    #   旧写法 " + ".join(parts) 是左深链 ⇒ 词元上千时 SQLite 直接拒绝解析 ✗
+    while len(parts) > 1:
+        parts = [
+            "(%s + %s)" % (parts[i], parts[i + 1]) if i + 1 < len(parts)
+            else parts[i]
+            for i in range(0, len(parts), 2)
+        ]
+    return parts[0]
 
 
 def proximity_bonus(text, tokens, window=30, bonus=4):

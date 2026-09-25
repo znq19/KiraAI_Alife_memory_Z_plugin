@@ -34,6 +34,8 @@ from .contracts import (
     dump,
 )
 
+from .mdecide import COMPRESS_KEEP_MIN, SAME_NOT_SAME_MAX  # 用于压缩预筛 / 合并先审的阈值 ✓
+
 logger = logging.getLogger("alife_memory_z")
 
 COMMON_INSTRUCTION = (
@@ -970,6 +972,209 @@ class Engine:
         return value
 
     # ── v2.18.74：JEV 决策（生效）──────────────────────────────
+    async def jev_compress_screen(self, candidates, cfg):
+        """压缩**前置**筛选：逐条判「值不值得长期记」⇒ 只把够格的送进压缩输入。
+
+        ★ 按**轮次**判定，且**用户侧与助手侧都判**（实测 2026-09-25）：
+          · 为什么也判助手：原本压缩对助手消息也提取 ✓，而信息常落在助手回复里
+            （用户"你把我那些事记一下" 0.27 ✗ ／ 助手"我记下了：①花生过敏②周日提醒…" **0.98** ✓）
+            只判用户侧 ⇒ 这类整轮被连坐归档 ⇒ **信息一起丢** ✗
+          · 轮次规则：轮内**任意一条** ≥ 0.50 ⇒ 整轮保留 ✓；否则整轮直归档 ✓
+            （工具步不单独判，随轮走 ✓；一轮里全是工具步 ⇒ 判不了就不动 ✓）
+          · 一条都没达标的轮 ⇒ 全部直归档 + **不调大模型**（省一次调用 ✓）
+
+        归档 = `archive_distilled`（active=0 ⇒ 等同已压缩；原文仍可按 ID 检索 ✓）
+        且归档后不会再被压缩计划挑中（计划只取 active ✓）⇒ 不会反复被打分 ✓
+
+        JEV 未启用/不可用/失败/解析不全 ⇒ 原样放行，且**不许封档** ✗（判不了就不动 ✓）
+        返回 (filtered_candidates, skip_all)
+        """
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not getattr(cfg, "jev_enabled", False):
+            return candidates, False
+        if not getattr(cfg, "jev_compress", False) or not decisions.ready:
+            return candidates, False
+
+        def _tool(row):
+            return str((row or {}).get("category") or "") == "tool"
+
+        items = [("m%s" % row["id"], str(row.get("role") or "user"),
+                  str(row.get("summary") or row.get("content") or ""))
+                 for row in candidates
+                 if not _tool(row)
+                 and str(row.get("summary") or row.get("content") or "").strip()]
+        if not items:
+            return candidates, False
+        try:
+            scores = await decisions.compress_screen(items)
+        except Exception:
+            logger.debug("[记忆·Z] JEV 压缩预筛失败（照常压缩）", exc_info=True)
+            return candidates, False
+        if not scores or len(scores) != len(items):
+            return candidates, False
+
+        # 按轮切分（遇到用户消息即开新轮；批首的助手消息自成一轮 ✓）
+        rounds = []
+        for row in candidates:
+            is_user = str(row.get("role") or "") != "assistant"
+            if is_user or not rounds:
+                rounds.append([row])
+            else:
+                rounds[-1].append(row)
+
+        kept, excluded, top, kept_users = [], [], 0.0, 0
+        for rnd in rounds:
+            vals = [scores["m%s" % r["id"]] for r in rnd if ("m%s" % r["id"]) in scores]
+            if not vals:                       # 全是工具步/无文本 ⇒ 判不了就不动 ✓
+                kept.extend(rnd)
+                continue
+            best = max(vals)
+            top = max(top, best)
+            if best >= COMPRESS_KEEP_MIN:
+                kept.extend(rnd)
+                kept_users += sum(1 for r in rnd
+                                  if str(r.get("role") or "") != "assistant")
+            else:
+                excluded.extend(rnd)
+
+        archived = 0
+        if excluded:
+            try:
+                _sid = str((candidates[0] or {}).get("sid") or "")
+                archived = await self.store.call("archive_distilled", _sid, excluded) or 0
+            except Exception:
+                logger.debug("[记忆·Z] 预筛直归档失败（不影响压缩）", exc_info=True)
+
+        if not kept:
+            logger.info(
+                "[记忆·Z] JEV·压缩 预筛：%d 轮都不够格（最高 %.2f < %.2f）"
+                " ⇒ %d 条直归档 + **跳过压缩调用**（省一次 ✓ 原文仍可按 ID 检索 ✓）",
+                len(rounds), top, COMPRESS_KEEP_MIN, archived)
+            return candidates, True
+        logger.info(
+            "[记忆·Z] JEV·压缩 预筛：%d 轮 → 保留 %d 轮（%d 条消息，含 %d 条用户消息）"
+            "，其余 %d 条直归档（最高分 %.2f）",
+            len(rounds), sum(1 for _r in rounds
+                             if any(("m%s" % x["id"]) in scores for x in _r)
+                             and max(scores["m%s" % x["id"]] for x in _r
+                                     if ("m%s" % x["id"]) in scores) >= COMPRESS_KEEP_MIN),
+            len(kept), kept_users, archived, top)
+        return kept, False
+    async def _merge_plan_filter(self, batch, cfg):
+        """**先审后生成**：JEV 先决定每组的去向 ⇒ 过滤掉不该合/该丢的，再交给大模型。
+
+        返回 (filtered_batch, drop_verdicts, stats)
+          · filtered_batch：只含「该合 / 交回大模型」的候选
+            ⇒ 大模型**输入更小**，且不会给"被否决的候选"白写合并正文 ✓✓
+          · drop_verdicts：该进回收站的候选（合成判定，**无需大模型** ✓）
+          · stats：{'merge':n,'drop':n,'keep':n,'inherit':n}（用于日志 ✓）
+
+        主事实用**确定性规则**挑（重要度 → 内容长度 → id），替代原先"让大模型选" ✓
+        JEV 未启用/不可用/失败/解析不全 ⇒ 原样返回（= 关闭 JEV 的行为 ✓）
+        """
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not getattr(cfg, "jev_enabled", False):
+            return batch, [], {}
+        if not getattr(cfg, "jev_merge", False) or not decisions.ready:
+            return batch, [], {}
+
+        def _rank(group):
+            return sorted(group, key=lambda r: (-(r.get("importance") or 0),
+                                               -len(str(r.get("content") or "")),
+                                               r["id"]))
+
+        ranked = [_rank(group) for group in batch]
+        items = []
+        for gi, members in enumerate(ranked):
+            primary = str(members[0].get("content") or "")
+            if not primary:
+                return batch, [], {}                  # 数据不全 ⇒ 不冒险 ✓
+            for ci, row in enumerate(members[1:], 1):
+                items.append(("c%d_%d" % (gi, ci), primary, str(row.get("content") or "")))
+        if not items:
+            return batch, [], {}
+        try:
+            routes = await decisions.merge_plan(items)
+        except Exception:
+            logger.debug("[记忆·Z] JEV 合并先审失败（放行给大模型）", exc_info=True)
+            return batch, [], {}
+        if not routes:
+            return batch, [], {}                      # 不可用/解析不全 ⇒ 放行 ✓
+
+        filtered, drops = [], []
+        stats = {"merge": 0, "drop": 0, "keep": 0, "inherit": 0}
+        for gi, (group, members) in enumerate(zip(batch, ranked)):
+            target = members[0]
+            keep_rows, drop_rows = [target], []
+            for ci, row in enumerate(members[1:], 1):
+                route = routes.get("c%d_%d" % (gi, ci), "inherit")   # 缺省保守放行 ✓
+                stats[route] = stats.get(route, 0) + 1
+                if route == "drop":
+                    drop_rows.append(row)
+                elif route in ("merge", "inherit"):
+                    keep_rows.append(row)
+                # keep ⇒ 既不送大模型也不删 ⇒ 原样不动 ✓
+            if len(keep_rows) > 1:
+                filtered.append(keep_rows)
+            if drop_rows:
+                drops.append((group, {
+                    "target_id": target["id"],
+                    "source_ids": [r["id"] for r in drop_rows],
+                    "action": "drop",
+                    "content": "",
+                    "reason": "JEV：低价值重复，进回收站（可还原）",
+                }))
+        return filtered, drops, stats
+
+    async def jev_merge_prescreen(self, batch, cfg):
+        """合并**预筛**：返回 True 表示「整批候选都明确不是同一件事」⇒ 可跳过大模型合并。
+
+        ★ 2026-09-25 真机实测：**接线无收益，故保持未接线** ✓
+          线上活路径 `_merge_plan_filter`（四态路由）已经做到「整批都不该合并 ⇒
+          一次大模型都不调」；本预筛唯一会跳的场景，线上本来就轮不到调模型
+          ⇒ 只多花 1 次 JEV 调用、省 0 次大模型（实测 S1~S5：省 0 / 多 1）✗
+          保留实现备查（若将来把「路由」整体换掉，可就地复用 ✓）
+
+        **保守**：只要有一条落在模糊带（> SAME_NOT_SAME_MAX），或解析失败/不可用 ⇒ 返回 False
+        （照常调大模型 ✓ 绝不误跳）。省的是那次**大调用**（含来源原文证据 + 生成正文）。
+        """
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not getattr(cfg, "jev_enabled", False):
+            return False
+        if not getattr(cfg, "jev_merge", False) or not decisions.ready:
+            return False
+        items = []
+        for gi, group in enumerate(batch):
+            members = sorted(group, key=lambda r: (-len(str(r.get("content") or "")), r["id"]))
+            primary = str(members[0].get("content") or "")
+            if not primary:
+                return False                     # 数据不全 ⇒ 不冒险 ✓
+            for ci, row in enumerate(members[1:], 1):
+                cand = str(row.get("content") or "")
+                if not cand:
+                    return False
+                items.append(("g%d_%d" % (gi, ci), primary, cand))
+        if not items:
+            return False
+        try:
+            scores = await decisions.merge_prescreen(items)
+        except Exception:
+            logger.debug("[记忆·Z] JEV 合并预筛失败（照常调大模型）", exc_info=True)
+            return False
+        if not scores or len(scores) != len(items):
+            return False                          # 不完整 ⇒ 不跳 ✓
+        # ★ 缓存起来（键 = 主事实+候选文本）⇒ 后置三问**不再重复问 same**（省约 1/3 用量 ✓）
+        cache = getattr(self, "_merge_same_cache", None)
+        if cache is None:
+            cache = self._merge_same_cache = {}
+        for (key, primary, cand), score in zip(items, [scores[k] for k, _p, _c in items]):
+            cache[(primary, cand)] = score
+        if len(cache) > 512:                      # 有界，防内存膨胀
+            for k in list(cache)[:256]:
+                cache.pop(k, None)
+        low = [s for s in scores.values() if s is not None and s <= SAME_NOT_SAME_MAX]
+        return len(low) == len(scores)            # **全部**明确不同才跳 ✓
+
     async def jev_apply_merge_route(self, verdicts, cfg):
         """JEV 参与合并路由（**生效**）：merge 照合 / drop 进回收站 / 不该动的摘出去。
 
@@ -984,6 +1189,8 @@ class Engine:
             return verdicts
         if not getattr(cfg, "jev_merge", False) or not decisions.ready:
             return verdicts
+        _tok0 = getattr(decisions, "tokens", 0)      # ★ 用**本次增量**，别打累计值 ✗（会被误读成单次开销）
+        n_same = n_diff = n_inherit = 0
         out = []
         for group, verdict in verdicts:
             action = str(verdict.get("action") or "merge")
@@ -995,22 +1202,31 @@ class Engine:
                 target = next(r for r in group if r["id"] == verdict["target_id"])
                 cands = [(str(r["id"]), str(r["content"])) for r in group
                          if r["id"] in sources and r["id"] != verdict["target_id"]]
-                route = await decisions.merge_route(str(target["content"]), cands) if cands else None
+                _cache = getattr(self, "_merge_same_cache", {}) or {}
+                _hints = {k: _cache[(str(target["content"]), t)]
+                          for k, t in cands if (str(target["content"]), t) in _cache}
+                route = (await decisions.merge_route(str(target["content"]), cands,
+                                                     hints=_hints)) if cands else None
             except Exception:
                 route = None
             if not route:
                 out.append((group, verdict))
                 continue
-            merge_ids = [fid for fid, _ in cands if route.get(fid) == "merge"]
+            # inherit = 判不准 ⇒ **保持大模型的原判定**（不干预 ✓）
+            merge_ids = [fid for fid, _ in cands if route.get(fid) in ("merge", "inherit")]
             drop_ids = [fid for fid, _ in cands if route.get(fid) == "drop"]
-            keep_ids = [fid for fid, _ in cands if route.get(fid) not in ("merge", "drop")]
+            keep_ids = [fid for fid, _ in cands
+                        if route.get(fid) not in ("merge", "drop", "inherit")]
             decisions.log.write("merge", {
                 "target": verdict["target_id"], "primary": str(target["content"])[:160],
                 "route": route, "merge": merge_ids, "drop": drop_ids, "keep": keep_ids,
                 "tokens": decisions.tokens})
+            n_inherit += sum(1 for fid, _ in cands if route.get(fid) == "inherit")
+            n_same += sum(1 for fid, _ in cands if route.get(fid) == "merge") + len(drop_ids)
+            n_diff += len(keep_ids)
             if not merge_ids and not drop_ids:
                 logger.info("[记忆·Z] JEV·合并 该组 %d 条判定为「不是同一件事」⇒ 保持原样",
-                        len(keep_ids))
+                            len(keep_ids))
                 continue                                  # 全组不动 ⇒ 这组不动作
             if merge_ids:
                 merged_verdict = dict(verdict)
@@ -1032,8 +1248,11 @@ class Engine:
                           if v.get("action") != "drop")
             _dropped = sum(len(v.get("source_ids") or []) for _g, v in out
                            if v.get("action") == "drop")
-            logger.info("[记忆·Z] JEV·合并 %d 组 → 并入 %d 条、回收站 %d 条（%d tok）",
-                        len(verdicts), max(_merged, 0), _dropped, decisions.tokens)
+            logger.info(
+                "[记忆·Z] JEV·合并 %d 组：判定「同一件事」%d 条 /「不同事」%d 条 / 交回大模型 %d 条 "
+                "⇒ 并入 %d 条、回收站 %d 条（本次 %d tok）",
+                len(verdicts), n_same, n_diff, n_inherit, max(_merged, 0), _dropped,
+                getattr(decisions, "tokens", 0) - _tok0)
         return out
 
     async def jev_apply_importance(self, facts, cfg):
@@ -1295,6 +1514,18 @@ class Engine:
                     continue
             except Exception:
                 logger.exception("[记忆·Z] 迁移直归档判定失败（按普通压缩继续 ✓）")
+            # ★ v2.20.3 JEV 压缩**前置**筛选：只把「值得长期记」的消息送进压缩输入
+            #   （整批都没价值 ⇒ 直接跳过这次调用 ✓；必须在 archive_distilled 之前 ✓）
+            try:                    # ★ 双保险：预筛出任何意外都照常压缩 ✓
+                candidates, _skip_compress = await self.jev_compress_screen(
+                    candidates, cfg)
+            except Exception:
+                logger.debug("[记忆·Z] JEV 预筛异常 ⇒ 照常压缩", exc_info=True)
+                _skip_compress = False
+            if _skip_compress:
+                steps.append({"count": 0, "level": level,
+                              "note": "JEV 预筛：本批无值得长期记的内容 ⇒ 跳过压缩调用"})
+                continue
             # Bound complete records in one pass, never truncate evidence or fabricate a level.
             names = await self.name_map(
                 {user for row in candidates for user in row["users"]}
@@ -1787,10 +2018,25 @@ class Engine:
                         "evidence": evidence,
                     }
                 )
+            # ★ v2.20.2 **先审后生成**：JEV 先决定每组去向 ⇒ 只把「该合/交回大模型」的
+            #   候选送给大模型（输入更小、且不会给被否决的候选白写合并正文 ✓✓）
+            batch, drop_verdicts, plan_stats = await self._merge_plan_filter(batch, cfg)
+            plan_active = bool(plan_stats)
+            if plan_active:
+                logger.info(
+                    "[记忆·Z] JEV·合并 先审：本批 该合 %d / 回收站 %d / 不动 %d / 交回大模型 %d"
+                    " ⇒ 大模型只需处理 %d 组",
+                    plan_stats.get("merge", 0), plan_stats.get("drop", 0),
+                    plan_stats.get("keep", 0), plan_stats.get("inherit", 0), len(batch))
             payload = {"groups": groups_view}
             fallback = False
             try:
-                output = await self.structured(FactMerge, "fact_merge", payload, cfg)
+                if batch:
+                    output = await self.structured(FactMerge, "fact_merge", payload, cfg)
+                else:
+                    # 没有任何被批准的合并 ⇒ **大模型完全不用调** ✓（该回收的照常回收 ✓）
+                    logger.info("[记忆·Z] JEV·合并 先审：本批无需大模型（省一次大调用）")
+                    output = {"groups": []}
                 output = restore_group_ids(output, group_aliases)
                 if len(output["groups"]) != len(batch):
                     raise ValueError("merge group count mismatch")
@@ -1837,7 +2083,11 @@ class Engine:
             if self.settings() != cfg:
                 return merged
             # v2.18.74：JEV 参与合并路由（生效；未启用/失败即原样返回）
-            verdicts = await self.jev_apply_merge_route(verdicts, cfg)
+            # 「先审」产生的回收站判定直接并入（无需大模型 ✓）
+            verdicts = list(verdicts) + list(drop_verdicts)
+            if not plan_active:
+                # JEV 未参与（未启用/失败/解析不全）⇒ 仍走后置细化（= 原行为 ✓）
+                verdicts = await self.jev_apply_merge_route(verdicts, cfg)
             # 明细：哪几条并进了哪条（前端据此渲染「旧 → 新」）
             for group, verdict in verdicts:
                 target = next(r for r in group if r["id"] == verdict["target_id"])
@@ -1878,6 +2128,15 @@ class Engine:
                         for row in group:
                             if row["id"] == verdict["target_id"]:
                                 continue
+                            # ★ 2026-09-25：**先解除「待合并」再软删** ✓
+                            #   mark_merge_pending 只作用于 deleted=0 的行 ⇒ 删完再清就清不到 ✗
+                            #   会留下 pending=1 的僵尸标记（已删行不被取用 ⇒ 无实际影响，
+                            #   但恢复出回收站后会被重新扫成待合并 ⇒ 顺手清干净 ✓）
+                            try:
+                                await self.store.call(
+                                    "mark_merge_pending", [row["id"]], 0)
+                            except Exception:
+                                pass
                             await self.store.call(
                                 "edit",
                                 "fact",
@@ -1984,6 +2243,13 @@ class Engine:
                     await self.store.call(
                         "mark_merge_pending", [row["id"] for row in group], 0
                     )
+            # ★ v2.20.1：收尾统一解除「待合并」标记。
+            #   merge / drop 由存储层清掉了，但 **JEV 判全组不同事** 与 **relabel** 两条路径不会 ✗
+            #   ⇒ 那些事实会带着 merge_pending=1 被排除在召回与审计之外（等于被隐藏 ✗✗）
+            try:
+                await self.store.call("mark_merge_pending", sorted(covered), 0)
+            except Exception:
+                logger.debug("[记忆·Z] 解除待合并标记失败（下次任务会再扫）", exc_info=True)
             if job_id and items:
                 await self.store.call("add_job_items", job_id, items)
         return merged

@@ -254,6 +254,29 @@ class DecisionsCase(unittest.TestCase):
                          "只压不抬：核心/一般 不写回；无价值=1；置信 0.1 不足 ⇒ 跳过")
 
 
+class MergeThresholdCase(unittest.TestCase):
+    """★ 用户实测反馈：换词重复（不吃香菜 / 讨厌香菜）曾被阈值误杀 ⇒ keep ✗（既不合并也不丢）。
+
+    真机实测（2026-09-25，放宽判据 + 阈值 0.5 后）：
+      换词重复 same=0.68 new=0.77 ⇒ merge ✓
+      纯重复   same=0.94 new=0.11 ⇒ drop（回收站）✓
+      真不同事 same≤0.12           ⇒ keep ✓（不误合）
+    """
+
+    def test_paraphrase_duplicate_merges(self):
+        self.assertEqual(md.route_merge(0.68, 0.77, 0.58), "merge",
+                         "换词重复必须能合并（曾经的回归 ✗）")
+
+    def test_pure_repeat_goes_to_recycle(self):
+        self.assertEqual(md.route_merge(0.94, 0.11, 0.35), "drop")
+
+    def test_clearly_different_kept(self):
+        for same in (0.05, 0.07, 0.12):
+            self.assertEqual(md.route_merge(same, 0.85, 0.87), "keep",
+                             "明确不同事 ⇒ 不动（不误合、不误删）")
+        self.assertEqual(md.SAME_HIGH, 0.50, "阈值 0.5 是有实测依据的，别随手改")
+
+
 class MixedRefineCase(unittest.TestCase):
     """★ 一次调用同时给「事实 + 档案」两组候选打分（省一次往返）。
 
@@ -525,3 +548,75 @@ class AuxRebuildCase(unittest.TestCase):
         """开了但密钥没解析到 ⇒ 未就绪（此时应打 warning 提示，而不是静默 ✗）。"""
         d = md.Decisions(self._S(jev_enabled=True), None, None)
         self.assertFalse(d.ready)
+
+
+class MergeInheritCase(unittest.TestCase):
+    """★ 第四态 inherit：判不准的一律**交回大模型**（= 原行为）。
+
+    实测依据（2026-09-25）：想加的「同话题」判据不可靠 ——
+      同主题不同角度 0.39 vs 互不相干 0.36（只差 0.03 ✗）
+    ⇒ 用它会把这个区间的无关事实也合进来（稀释 ✗）
+    ⇒ 改为：只在两端出手（明确同/明确异），中间带交回大模型 ✓
+    """
+
+    def test_ambiguous_band_inherits(self):
+        for same in (0.20, 0.30, 0.40, 0.49):
+            self.assertEqual(md.route_merge_soft(same, 0.85, 0.87), "inherit",
+                             "模糊带必须交回大模型，而不是替它决定")
+
+    def test_clearly_different_still_skips_llm(self):
+        for same in (0.05, 0.12):
+            self.assertEqual(md.route_merge_soft(same, 0.85, 0.87), "keep",
+                             "明确无关 ⇒ 省掉大模型调用")
+
+    def test_confident_cases_unchanged(self):
+        self.assertEqual(md.route_merge_soft(0.68, 0.77, 0.58), "merge")
+        self.assertEqual(md.route_merge_soft(0.94, 0.11, 0.35), "drop")
+        self.assertEqual(md.route_merge_soft(None, 0.9, 0.1), "keep")
+
+
+class MergeHintReuseCase(unittest.TestCase):
+    """★ 预筛已问过 same ⇒ 三问时必须**跳过重复提问**（省约 1/3 的 JEV 用量）。
+
+    时机是严格串行的：预筛（大模型之前）→ 大模型 → 三问（大模型之后）→ 落库。
+    这里守住"第三问不重复问 same"，并确认 hint 的分数被真正采纳 ✓
+    """
+
+    def test_hint_skips_same_question_and_is_used(self):
+        seen = []
+
+        def fake_post(payload, timeout):
+            qs = payload.get("questions") or {}
+            seen.append(set(qs))
+            # new 高（有新信息）、dilute 低（不稀释）⇒ 期望 merge ✓
+            ans = {k: {"type": "noul", "noul": 0.9 if k.startswith("new_") else 0.5}
+                   for k in qs}
+            return {"answers": ans, "usage": {"input_tokens": 5}}
+
+        c = md.JevClient("https://x.invalid", "k", "jev-latest")
+        c._post_sync = fake_post                 # type: ignore[assignment]
+        d = md.Decisions(md.JevConfig(enabled=True, base_url="https://x.invalid",
+                                      api_key="k", model="jev-latest"), None, None)
+        d._client = c
+        out = run(d.merge_route("主事实", [("1", "候选")], hints={"1": 0.88}))
+        self.assertEqual(seen[0], {"new_1", "dilute_1"},
+                         "有预筛结果时**不能再问 same**（否则白花 ✗）")
+        # hint(0.88 ⇒ 同一件事) + new 0.5 + dilute 0.5 ⇒ 合并 ✓
+        self.assertEqual(out, {"1": "merge"})
+
+    def test_without_hint_still_asks_same(self):
+        seen = []
+
+        def fake_post(payload, timeout):
+            qs = payload.get("questions") or {}
+            seen.append(set(qs))
+            return {"answers": {k: {"type": "noul", "noul": 0.5} for k in qs},
+                    "usage": {"input_tokens": 5}}
+
+        c = md.JevClient("https://x.invalid", "k", "jev-latest")
+        c._post_sync = fake_post                 # type: ignore[assignment]
+        d = md.Decisions(md.JevConfig(enabled=True, base_url="https://x.invalid",
+                                      api_key="k", model="jev-latest"), None, None)
+        d._client = c
+        run(d.merge_route("主事实", [("1", "候选")]))
+        self.assertEqual(seen[0], {"same_1", "new_1", "dilute_1"}, "没有预筛时三问齐全 ✓")

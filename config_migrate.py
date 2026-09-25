@@ -7,7 +7,7 @@ defaults (including prompt wording) without overriding personal choices.
 
 from .contracts import FACT_MERGE_PROMPT, RECORD_MERGE_PROMPT
 
-CURRENT_VERSION = 7
+CURRENT_VERSION = 8
 
 # v2.18.9 之前的 fact_merge_prompt 默认文案 ✓
 # 只用来把"从没改过措辞"的存量配置升到新文案 ✓ 用户自己改过的一律不碰 ✓
@@ -17,6 +17,8 @@ _OLD_FACT_MERGE_PROMPT = '输入是若干组相似事实（groups[]）：同组�
 # 只用来把"没改过措辞"的存量配置升到那一版 ✓ 用户自己改过的一律不碰 ✓
 # （2026-09-23：合并提示词又要加"密度"一句 ⇒ 上一版目标值必须**固化**成字面量 ✗
 #   否则 v5 会跟着最新文案一起变 ⇒ 老配置被一步跳到最新、v7 失去意义 ✓）
+_V7_FACT_MERGE_PROMPT = '输入 groups[]：同组同主体，类别可能相同也可能不同；facts 按时间从新到旧排列，facts[0] 最新；若附了 evidence，那是这些事实的来源原文，用它核对。\n每组输出一条，数量与顺序与输入完全一致。【必须给出动作，没有 keep】三种动作：\n- merge：同一件事 → 以 facts[0] 为基准合并，把其余事实独有的人名、数字、日期、否定、条件、状态补进去；冲突以时间较晚者为准；不同对象分别写明，不得丢弃独有信息。合并结果不能比最长的一条明显更长，删掉重复表述。content 必须自包含，不写“同上”、不引用 ID、不写“根据记录”之类元话，不得编造。**合并后若原标签不再贴切，一并给 tags** ✗（不给就沿用原来的并集 ✓）\n**但“以时间较晚者为准”只适用于同一来源强度**：若附了 evidence，其中的 bot=1 表示那条原文是**助手自己说的** ✗ —— 助手更晚的转述**不能覆盖用户更早的原话** ✓ 冲突时一律以用户为准；没有证据就按原说法保留，别凭“更晚”擅自改结论。\n- relabel：同一件事，但两边内容各自都成立、无需合并 → 只统一类别（给 category）。\n- drop：若干条是纯冗余或错误 → 保留 target_id，其余进 source_ids 删除（可恢复）。\n跨类别（组内 category 不一致）必须给 category；合并前会先把整组统一到该类别。\n硬性字数：每条 content ≤ {content_max} 字，reason ≤ {reason_max} 字；超出即判定失败。\n只输出 JSON：{"groups":[{"target_id":"…","source_ids":["…"],"action":"merge|relabel|drop","category":"…","content":"…","reason":"…"}]}\ntarget_id 取要保留的那条 id；source_ids 至少一条，逐字复制。'
+
 _V5_FACT_MERGE_PROMPT = '输入 groups[]：同组同主体，类别可能相同也可能不同；facts 按时间从新到旧排列，facts[0] 最新；若附了 evidence，那是这些事实的来源原文，用它核对。\n每组输出一条，数量与顺序与输入完全一致。【必须给出动作，没有 keep】三种动作：\n- merge：同一件事 → 以 facts[0] 为基准合并，把其余事实独有的人名、数字、日期、否定、条件、状态补进去；冲突以时间较晚者为准；不同对象分别写明，不得丢弃独有信息。content 必须自包含，不写“同上”、不引用 ID、不写“根据记录”之类元话，不得编造。**合并后若原标签不再贴切，一并给 tags** ✗（不给就沿用原来的并集 ✓）\n**但“以时间较晚者为准”只适用于同一来源强度**：若附了 evidence，其中的 bot=1 表示那条原文是**助手自己说的** ✗ —— 助手更晚的转述**不能覆盖用户更早的原话** ✓ 冲突时一律以用户为准；没有证据就按原说法保留，别凭“更晚”擅自改结论。\n- relabel：同一件事，但两边内容各自都成立、无需合并 → 只统一类别（给 category）。\n- drop：若干条是纯冗余或错误 → 保留 target_id，其余进 source_ids 删除（可恢复）。\n跨类别（组内 category 不一致）必须给 category；合并前会先把整组统一到该类别。\n硬性字数：每条 content ≤ {content_max} 字，reason ≤ {reason_max} 字；超出即判定失败。\n只输出 JSON：{"groups":[{"target_id":"…","source_ids":["…"],"action":"merge|relabel|drop","category":"…","content":"…","reason":"…"}]}\ntarget_id 取要保留的那条 id；source_ids 至少一条，逐字复制。'
 
 # version -> [(key, previous default, new default), ...]
@@ -59,6 +61,13 @@ MIGRATIONS = {
         ("fact_merge_prompt", _V5_FACT_MERGE_PROMPT, FACT_MERGE_PROMPT),
         ("record_merge_prompt", _V6_RECORD_MERGE_PROMPT, RECORD_MERGE_PROMPT),
     ],
+    8: [
+        # v2.20.0（2026-09-25）：把 JEV 那套「判 drop 前先自问三问」借进合并提示词 ✓
+        #   目标：**不开 JEV 时，合并模型自己也能判 drop**（纯冗余直接进回收站 ✓）
+        #   存量配置里若还是上一版默认文案 ⇒ 升级 ✓；用户自己改过措辞 ⇒ 一个字不动 ✓
+        ("fact_merge_prompt", _V7_FACT_MERGE_PROMPT, FACT_MERGE_PROMPT),
+    ],
+
 }
 
 

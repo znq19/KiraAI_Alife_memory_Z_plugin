@@ -13,8 +13,9 @@ mod = importlib.import_module("alife_cfgv7.config_migrate")
 contracts = importlib.import_module("alife_cfgv7.contracts")
 
 
-def test_current_version_is_seven():
-    assert mod.CURRENT_VERSION == 7
+def test_current_version_at_least_seven():
+    """v7 的迁移规则永远有效；当前版本号已升到 8（见 test_config_migration_v8.py）"""
+    assert mod.CURRENT_VERSION >= 7
 
 
 def test_previous_default_threshold_is_upgraded():

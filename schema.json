@@ -336,6 +336,12 @@
         "default": false,
         "description": "写入时由 JEV 给事实定重要度（核心/重要/一般/琐碎，对应分数 9/7/5/3）。重要度 ≥8 永不沉；一次性事务会自然下沉。"
       },
+      "jev_compress": {
+        "type": "switch",
+        "name": "JEV 用于压缩前置筛选",
+        "default": false,
+        "description": "压缩前先筛一遍：只把「值得长期记住」的消息送进压缩输入，整批都没价值时直接跳过这次压缩调用（记录留着，下次还会再抽，不丢内容）。"
+      },
       "rerank_model": {
         "type": "model_select",
         "name": "启用模型重排（可选，默认关闭）",
@@ -804,7 +810,7 @@
       "fact_merge_prompt": {
         "type": "string",
         "name": "事实合并提示词",
-        "default": "输入 groups[]：同组同主体，类别可能相同也可能不同；facts 按时间从新到旧排列，facts[0] 最新；若附了 evidence，那是这些事实的来源原文，用它核对。\n每组输出一条，数量与顺序与输入完全一致。【必须给出动作，没有 keep】三种动作：\n- merge：同一件事 → 以 facts[0] 为基准合并，把其余事实独有的人名、数字、日期、否定、条件、状态补进去；冲突以时间较晚者为准；不同对象分别写明，不得丢弃独有信息。合并结果不能比最长的一条明显更长，删掉重复表述。content 必须自包含，不写“同上”、不引用 ID、不写“根据记录”之类元话，不得编造。**合并后若原标签不再贴切，一并给 tags** ✗（不给就沿用原来的并集 ✓）\n**但“以时间较晚者为准”只适用于同一来源强度**：若附了 evidence，其中的 bot=1 表示那条原文是**助手自己说的** ✗ —— 助手更晚的转述**不能覆盖用户更早的原话** ✓ 冲突时一律以用户为准；没有证据就按原说法保留，别凭“更晚”擅自改结论。\n- relabel：同一件事，但两边内容各自都成立、无需合并 → 只统一类别（给 category）。\n- drop：若干条是纯冗余或错误 → 保留 target_id，其余进 source_ids 删除（可恢复）。\n跨类别（组内 category 不一致）必须给 category；合并前会先把整组统一到该类别。\n硬性字数：每条 content ≤ {content_max} 字，reason ≤ {reason_max} 字；超出即判定失败。\n只输出 JSON：{\"groups\":[{\"target_id\":\"…\",\"source_ids\":[\"…\"],\"action\":\"merge|relabel|drop\",\"category\":\"…\",\"content\":\"…\",\"reason\":\"…\"}]}\ntarget_id 取要保留的那条 id；source_ids 至少一条，逐字复制。",
+        "default": "输入 groups[]：同组同主体，类别可能相同也可能不同；facts 按时间从新到旧排列，facts[0] 最新；若附了 evidence，那是这些事实的来源原文，用它核对。\n每组输出一条，数量与顺序与输入完全一致。【必须给出动作，没有 keep】三种动作：\n- merge：同一件事 → 以 facts[0] 为基准合并，把其余事实独有的人名、数字、日期、否定、条件、状态补进去；冲突以时间较晚者为准；不同对象分别写明，不得丢弃独有信息。合并结果不能比最长的一条明显更长，删掉重复表述。content 必须自包含，不写“同上”、不引用 ID、不写“根据记录”之类元话，不得编造。**合并后若原标签不再贴切，一并给 tags** ✗（不给就沿用原来的并集 ✓）\n**但“以时间较晚者为准”只适用于同一来源强度**：若附了 evidence，其中的 bot=1 表示那条原文是**助手自己说的** ✗ —— 助手更晚的转述**不能覆盖用户更早的原话** ✓ 冲突时一律以用户为准；没有证据就按原说法保留，别凭“更晚”擅自改结论。\n- relabel：同一件事，但两边内容各自都成立、无需合并 → 只统一类别（给 category）。\n- drop：若干条是纯冗余或错误 → 保留 target_id，其余进 source_ids 删除（可恢复）。**若某条 fact 的信息已被 target 完全覆盖**（它没有任何 target 没有的内容）⇒ 直接 drop，**不要**去写合并正文（写出来与 target 等价 ⇒ 白花 token ✓）；只有需要补充信息时才用 merge ✓。\n**判 drop 前逐条自问三问**（只服务 drop，答错会误删 ✗）：① 它和 target 是**同一件事**吗（同一对象的同一方面，而不是「都提到了 X」）？② 它有没有 target **没有的实质信息**（人/数字/日期/否定/条件/状态/程度）？③ 并进 target 会让结论**变模糊**吗？⇒ 三条都过才可 drop（reason 写「与 target 重复」之类）；①否（本来就是两件事）或 ②有（删了会丢信息）⇒ **不许 drop** ✗，改 merge 分别写明 ✓。拿不准一律不许 drop ✗。**信息已被 target 完全覆盖**（没有 target 没有的内容）⇒ 直接 drop，**不要写合并正文**（写出来与 target 等价 ⇒ 白花 token ✗）；需要补充信息才用 merge ✓。三问只是内部判断，**不要写进 JSON** ✗（输出结构照旧，字段见白名单）。\n跨类别（组内 category 不一致）必须给 category；合并前会先把整组统一到该类别。\n硬性字数：每条 content ≤ {content_max} 字，reason ≤ {reason_max} 字；超出即判定失败。\n只输出 JSON：{\"groups\":[{\"target_id\":\"…\",\"source_ids\":[\"…\"],\"action\":\"merge|relabel|drop\",\"category\":\"…\",\"content\":\"…\",\"reason\":\"…\"}]}\ntarget_id 取要保留的那条 id；source_ids 至少一条，逐字复制。",
         "description": "事实合并提示词。可用 {content_max} 与 {reason_max} 占位符，保存后替换成上面的字数设置；无需再要求 JSON，程序会严格检查格式。；改乱了可点旁边的「恢复默认」"
       },
       "cross_session_merge": {
@@ -864,6 +870,16 @@
         "description": "人物列表卡片上直接显示的画像要点条数（按重要度取）。默认3。",
         "minimum": 1,
         "maximum": 10
+      },
+      "tool_refine_mode": {
+        "type": "string",
+        "name": "主动召回精修方式",
+        "default": "expand",
+        "description": "主动召回的精修方式。expand（默认）先从更宽的候选里挑（×3）再按相关性筛排，最后截回原条数，让「表面不像、实际相关」的记忆也有机会被看到；inline 只在原条数内精修。JEV 未启用或失败时两者都等于旧行为。",
+        "options": [
+          "expand",
+          "inline"
+        ]
       }
     }
   }

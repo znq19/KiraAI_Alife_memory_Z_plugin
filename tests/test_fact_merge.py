@@ -466,7 +466,7 @@ class JevEngineIntegration(unittest.TestCase):
         async def audit_prescreen(self, pairs):
             return list(self._suspicious)
 
-        async def merge_route(self, primary, cands):
+        async def merge_route(self, primary, cands, hints=None):
             # 引擎按**候选自身 id** 查表 ⇒ 桩必须用真实 key（否则全落进"keep"✗）
             keys = [k for k, _t in cands]
             return {keys[0]: "drop", keys[1]: "merge"} if len(keys) >= 2 else {}
@@ -526,3 +526,234 @@ class JevEngineIntegration(unittest.TestCase):
 
         out = run(eng.jev_apply_merge_route(verdicts, Off()))
         self.assertEqual(out, verdicts, "关闭 JEV 时不得做任何改动")
+
+
+
+class JevMergePrescreenCase(unittest.TestCase):
+    """★ 合并预筛：只有「整批候选都**明确**不是同一件事」才跳过大模型调用（保守 ✓）。
+
+    这是真正的"更快更省"：大模型那次合并调用含来源原文证据 + 要生成正文 ⇒ 真·大调用。
+    """
+
+    class _Log:
+        def write(self, *a, **k):
+            return None
+
+    class _D:
+        ready = True
+        tokens = 1
+
+        def __init__(self, scores):
+            self._scores = scores
+            self.log = JevMergePrescreenCase._Log()
+
+        async def merge_prescreen(self, items):
+            if self._scores is None:
+                return None
+            return dict(self._scores)
+
+        async def merge_route(self, primary, cands, hints=None):
+            return {}
+
+    class _Cfg:
+        jev_enabled = True
+        jev_merge = True
+        top_k = 5
+        jev_timeout_ms = 5000
+
+    class _Store:
+        async def call(self, *a, **k):
+            return None
+
+    def _engine(self, decisions):
+        eng = e.Engine(self._Store(), lambda: self._Cfg(), None, None, None)
+        eng.decisions = decisions
+        eng.store = self._Store()
+        return eng
+
+    BATCH = [[{"id": 1, "content": "AAA"}, {"id": 2, "content": "BBB"},
+              {"id": 3, "content": "CCC"}]]
+
+    def test_all_clearly_different_skips_llm(self):
+        eng = self._engine(self._D({"g0_1": 0.05, "g0_2": 0.03}))
+        self.assertTrue(run(eng.jev_merge_prescreen(self.BATCH, self._Cfg())),
+                        "全部明确不同 ⇒ 可以跳过大模型 ✓")
+
+    def test_ambiguous_band_does_not_skip(self):
+        eng = self._engine(self._D({"g0_1": 0.05, "g0_2": 0.40}))
+        self.assertFalse(run(eng.jev_merge_prescreen(self.BATCH, self._Cfg())),
+                         "有模糊带 ⇒ 必须照常调大模型 ✓")
+
+    def test_unavailable_does_not_skip(self):
+        eng = self._engine(self._D(None))
+        self.assertFalse(run(eng.jev_merge_prescreen(self.BATCH, self._Cfg())),
+                         "JEV 不可用 ⇒ 照常调大模型 ✓（绝不误跳）")
+
+    def test_incomplete_scores_do_not_skip(self):
+        eng = self._engine(self._D({"g0_1": 0.05}))
+        self.assertFalse(run(eng.jev_merge_prescreen(self.BATCH, self._Cfg())),
+                         "分数不完整 ⇒ 不冒险 ✓")
+
+
+class JevMergePlanCase(unittest.TestCase):
+    """★ 先审后生成：只把「该合/交回大模型」的候选给大模型；该回收的直接合成判定（不调大模型）。
+
+    这也是"正常顺序"：JEV 先审 → 只把批准的发给大模型写正文 ✓
+    """
+
+    class _Log:
+        def write(self, *a, **k):
+            return None
+
+    class _D:
+        ready = True
+
+        def __init__(self, routes):
+            self._routes = routes
+            self.log = JevMergePlanCase._Log()
+
+        async def merge_plan(self, items):
+            return dict(self._routes) if self._routes else None
+
+        async def merge_route(self, primary, cands, hints=None):
+            return {}
+
+    class _Cfg:
+        jev_enabled = True
+        jev_merge = True
+        top_k = 5
+        jev_timeout_ms = 5000
+
+    class _Store:
+        async def call(self, *a, **k):
+            return None
+
+    def _engine(self, decisions):
+        eng = e.Engine(self._Store(), lambda: self._Cfg(), None, None, None)
+        eng.decisions = decisions
+        eng.store = self._Store()
+        return eng
+
+    @staticmethod
+    def _row(i, imp, text):
+        return {"id": i, "importance": imp, "content": text, "summary": text,
+                "subject": "用户", "category": "preference", "sid": "s1", "deleted": 0}
+
+    def _batch(self):
+        # 主事实应由**重要度**决定（9 > 5 > 3）⇒ target 必须是 id=1
+        return [[self._row(1, 9, "用户不吃香菜，觉得像肥皂味"),
+                 self._row(2, 3, "用户讨厌香菜"),
+                 self._row(3, 5, "用户不吃动物内脏"),
+                 self._row(4, 4, "凌晨问如何把录制视频转音频")]]
+
+    def test_target_is_deterministic_by_importance(self):
+        eng = self._engine(self._D({"c0_1": "merge", "c0_2": "keep", "c0_3": "drop"}))
+        filtered, drops, stats = run(eng._merge_plan_filter(self._batch(), self._Cfg()))
+        self.assertEqual(filtered[0][0]["id"], 1, "主事实按重要度挑（不靠大模型 ✓）")
+
+    def test_kept_excluded_dropped_synthesised(self):
+        # 候选编号按**重要度排序后**的位置：id3(5)→c0_1、id4(4)→c0_2、id2(3)→c0_3
+        eng = self._engine(self._D({"c0_1": "inherit", "c0_2": "keep", "c0_3": "drop"}))
+        filtered, drops, stats = run(eng._merge_plan_filter(self._batch(), self._Cfg()))
+        self.assertEqual([r["id"] for r in filtered[0]], [1, 3],
+                         "只留 target 与「交回大模型」的候选（keep/drop 不进大模型 ✓）")
+        self.assertEqual(len(drops), 1)
+        self.assertEqual(drops[0][1]["source_ids"], [2], "该回收的合成 drop 判定 ✓")
+        self.assertEqual(stats, {"merge": 0, "drop": 1, "keep": 1, "inherit": 1})
+
+    def test_all_keep_means_no_llm_call(self):
+        eng = self._engine(self._D({"c0_1": "keep", "c0_2": "keep", "c0_3": "keep"}))
+        filtered, drops, stats = run(eng._merge_plan_filter(self._batch(), self._Cfg()))
+        self.assertEqual(filtered, [], "全「不动」⇒ 过滤后为空 ⇒ 大模型**不会被调用** ✓")
+        self.assertEqual(drops, [])
+        self.assertEqual(stats["keep"], 3)
+
+    def test_unavailable_passes_everything_through(self):
+        eng = self._engine(self._D(None))
+        filtered, drops, stats = run(eng._merge_plan_filter(self._batch(), self._Cfg()))
+        self.assertEqual(filtered, self._batch(), "JEV 不可用 ⇒ 原样放行（= 关闭 JEV ✓）")
+        self.assertEqual(stats, {})
+
+
+class JevCompressScreenCase(unittest.TestCase):
+    """★ 压缩前置筛选（用户 2026-09-25 定稿）：
+       按**轮次**判定；**用户侧与助手侧都判**（信息常落在助手回复里 ✓）；
+       轮内任意一条 ≥0.5 ⇒ 整轮保留；否则整轮直归档；全不够格 ⇒ 还不调大模型。
+    """
+
+    class _Log:
+        def write(self, *a, **k):
+            return None
+
+    class _D:
+        ready = True
+
+        def __init__(self, scores):
+            self._scores = scores
+            self.log = JevCompressScreenCase._Log()
+
+        async def compress_screen(self, items):
+            if self._scores is None:
+                return None
+            return {k: self._scores[k] for k, _r, _t in items if k in self._scores}
+
+    class _Cfg:
+        jev_enabled = True
+        jev_compress = True
+        jev_timeout_ms = 5000
+
+    class _Store:
+        def __init__(self):
+            self.calls = []
+
+        async def call(self, name, *a, **k):
+            self.calls.append((name, a))
+            return 2 if name == "archive_distilled" else None
+
+    ROWS = [
+        # 轮 1：信息在**助手**回复里（用户话很轻）
+        {"id": "m01", "sid": "s1", "role": "user", "summary": "用户：你把我那些事记一下"},
+        {"id": "m02", "sid": "s1", "role": "assistant",
+         "summary": "助手：好的我记下了：①花生过敏 ②每周日提醒你给妈妈打电话"},
+        # 轮 2：信息在**用户**消息里 + 一条工具步（不判，随轮走）
+        {"id": "m03", "sid": "s1", "role": "user", "summary": "用户：我花生过敏，严重会休克"},
+        {"id": "m04", "sid": "s1", "role": "assistant", "category": "tool",
+         "summary": "[调用工具：memorize(花生过敏)]"},
+        # 轮 3：纯闲聊
+        {"id": "m05", "sid": "s1", "role": "user", "summary": "用户：哈哈"},
+        {"id": "m06", "sid": "s1", "role": "assistant", "summary": "助手：呵"},
+    ]
+
+    def _engine(self, decisions, store=None):
+        st = store or self._Store()
+        eng = e.Engine(st, lambda: self._Cfg(), None, None, None)
+        eng.decisions = decisions
+        eng.store = st
+        return eng, st
+
+    def test_round_kept_by_assistant_side(self):
+        """★ 关键：用户话轻（0.27）但助手复述了事实（0.98）⇒ 整轮必须保留 ✓"""
+        eng, st = self._engine(self._D({"mm01": 0.27, "mm02": 0.98, "mm03": 0.96, "mm05": 0.17, "mm06": 0.04}))
+        filtered, skip = run(eng.jev_compress_screen(self.ROWS, self._Cfg()))
+        self.assertFalse(skip)
+        self.assertEqual([r["id"] for r in filtered], ["m01", "m02", "m03", "m04"],
+                         "轮1(靠助手) + 轮2(靠用户，含工具步) 保留 ✓")
+        arc = [c for c in st.calls if c[0] == "archive_distilled"]
+        self.assertEqual([r["id"] for r in arc[0][1][1]], ["m05", "m06"], "纯闲聊整轮归档 ✓")
+
+    def test_all_rounds_low_archives_and_skips(self):
+        eng, st = self._engine(self._D({"mm01": 0.20, "mm02": 0.10, "mm03": 0.30, "mm05": 0.05, "mm06": 0.02}))
+        filtered, skip = run(eng.jev_compress_screen(self.ROWS, self._Cfg()))
+        self.assertTrue(skip, "全不够格 ⇒ 不调大模型 ✓")
+        arc = [c for c in st.calls if c[0] == "archive_distilled"]
+        self.assertEqual([r["id"] for r in arc[0][1][1]],
+                         ["m01", "m02", "m03", "m04", "m05", "m06"],
+                         "全部归档 ✓（工具步 #4 随轮一起走 ✓）")
+
+    def test_unavailable_no_archiving(self):
+        eng, st = self._engine(self._D(None))
+        filtered, skip = run(eng.jev_compress_screen(self.ROWS, self._Cfg()))
+        self.assertEqual(filtered, self.ROWS, "JEV 不可用 ⇒ 原样（= 关闭 JEV ✓）")
+        self.assertFalse(skip)
+        self.assertEqual([c for c in st.calls if c[0] == "archive_distilled"], [],
+                         "判不了就不许封档 ✗")

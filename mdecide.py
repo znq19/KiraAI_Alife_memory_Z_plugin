@@ -51,8 +51,9 @@ DEFAULT_MODEL = "jev-latest"
 
 # ── 阈值：全部来自 2026-09-24 实测（真 key / 中英各约 150 条标注样本），
 #    上线后仍应在机标定；此处是**保守起点**，宁可弃权不可误判 ──
-SAME_HIGH = 0.60      # ≥ 视为"同一件事"
-SAME_LOW = 0.30       # ≤ 视为"明确不是同一件事"
+SAME_HIGH = 0.50      # ≥ 视为「同一件事」（实测：换词重复 0.54、明确不同 ≤0.08
+                      #   ⇒ 0.5 能救回换词重复，且与「不同事」仍有两倍以上余量）
+SAME_NOT_SAME_MAX = 0.30   # ≤ 视为"明确不是同一件事"（旧名 SAME_LOW 与下方 0.12 重名 ⇒ 被覆盖 ✗ 2026-09-25 改名）
 NEW_HIGH = 0.60       # ≥ 视为"带来实质新信息"
 DILUTE_HIGH = 0.75     # 实测：该合并档稀释 0.31~0.69 / 真会稀释 0.77~0.84    # ≥ 视为"并入正文会稀释重点"
                       #   实测：该合并的档位稀释 0.30~0.58，真会稀释的 0.77~0.84
@@ -359,14 +360,57 @@ def build_recall_filter(context: str, hits: list[tuple[str, str]],
 
 
 # ── 2) 合并路由：三信号 → 代码组合（绝不问"该怎么办"）──
+def build_compress_screen(key: str, text: str, role: str = "user") -> dict:
+    """压缩前筛消息。**用户侧与助手侧判据不同**（实测 2026-09-25）：
+
+    为什么要分角色：原本压缩**对助手消息也提取** ✓，而信息常常落在助手回复里
+      （例：用户"你把我那些事记一下" 0.27 ✗，助手"我记下了：①花生过敏②每周日提醒…" **0.98** ✓）
+    若只判用户侧，这类整轮会被连坐归档 ⇒ **信息一起丢** ✗
+    """
+    if role == "assistant":
+        return {
+            "m_" + key: q_noul(
+                f"[助手回复] {text} [/助手回复]\n"
+                "这条助手回复里有没有值得长期记住的用户信息，或需要对用户长期遵守的约定/承诺？",
+                "有：复述/确认了用户的持久事实，或做出了要长期遵守的约定、承诺、提醒安排",
+                "没有：寒暄、过程说明、工具结果、一次性答复",
+            ),
+        }
+    return {
+        "m_" + key: q_noul(
+            f"[消息] {text} [/消息]\n这条消息里有没有值得长期记住的用户信息？",
+            "有：用户的持久事实/偏好/身份/关系/约定/长期目标，或明确表达的情绪与态度",
+            "没有：寒暄、客套、一次性事务、纯提问、工具调用或没有信息量的内容",
+        ),
+    }
+
+
+def build_merge_prescreen(primary: str, key: str, text: str) -> dict:
+    """合并**预筛**：只问「是不是同一件事」（1 问/候选 ⇒ 最省 ✓）。
+
+    用途：在**调用大模型之前**先看一眼。若整批候选都明确「不是同一件事」，
+    就可以跳过大模型合并调用（省一次大调用 ✓）。
+    """
+    pre = f"[主事实] {primary} [/主事实]\n[候选] {text} [/候选]\n"
+    return {
+        "same_" + key: q_noul(
+            pre + "候选和主事实讲的是同一件事吗？",
+            "是：同一话题/同一对象的事 —— 说法不同、详略不同、角度不同、"
+            "重复询问或补充说明，都算同一件事",
+            "不是：互不相干的两件事（只是恰好都提到了同一个词）",
+        ),
+    }
+
+
 def build_merge_route_single(primary: str, key: str, text: str) -> dict:
     """单条候选的三问（自包含）。★ 与 build_merge_route 的区别：只问一条，避免批内干扰。"""
     pre = f"[主事实] {primary} [/主事实]\n[候选] {text} [/候选]\n"
     return {
         "same_" + key: q_noul(
-            pre + "候选和主事实讲的是同一个事实吗？（可以有更多细节）",
-            "同一个事实，只是说法不同或附带更多细节",
-            "另一件不同的事",
+            pre + "候选和主事实讲的是同一件事吗？",
+            "是：同一话题/同一对象的事 —— 说法不同、详略不同、角度不同、"
+            "重复询问或补充说明，都算同一件事",
+            "不是：互不相干的两件事（只是恰好都提到了同一个词）",
         ),
         "new_" + key: q_noul(
             pre + "候选里有主事实没有的实质信息吗？",
@@ -420,6 +464,28 @@ def route_merge(same: Optional[float], new: Optional[float], dilute: Optional[fl
     if dilute < DILUTE_HIGH:
         return "merge"                     # 有新信息且不稀释 ⇒ 该合的照合
     return "keep"                          # 会稀释主事实 ⇒ 不动（防稀释优先）
+
+
+# 「不是同一件事」那一侧的判法（实测标定，2026-09-25）：
+#   · 明确无关：same ≤ 0.12 ⇒ 直接 keep（省掉大模型 ✓）
+#   · 模糊地带（0.12 < same < 0.50）⇒ **交回大模型**（= 原行为 ✓）
+#     为什么不用"同话题"判据：实测同主题不同角度 0.39 / 互不相干 0.36 ⇒ 只差 0.03 ✗
+#     用它会把这个区间的**无关事实也合进来**（正是要避开的稀释 ✗）
+SAME_LOW = 0.12
+# 压缩前置筛选（用户 2026-09-25 定稿，两档；实测 AUC 1.00）：
+#   单条 ≥ COMPRESS_KEEP_MIN(0.50) ⇒ 进入压缩输入
+#   其余                          ⇒ **直归档**（active=0 ⇒ 等同已压缩；原文仍可按 ID 检索 ✓）
+#   一条都没到 0.50               ⇒ 全部直归档 + 不调大模型（省一次调用 ✓）
+COMPRESS_KEEP_MIN = 0.50
+
+
+def route_merge_soft(same, new, dilute):
+    """带第四态的路由：merge / drop / keep / **inherit**（判不准 ⇒ 交回大模型）。"""
+    if same is None:
+        return "keep"
+    if same >= SAME_HIGH:
+        return route_merge(same, new, dilute)
+    return "keep" if same <= SAME_LOW else "inherit"
 
 
 # ── 3) 重要度（写入时定级，进"重要度×2"的现有公式）──
@@ -572,7 +638,84 @@ class Decisions:
         return scored
 
     # ---------- 2) 合并路由 ----------
-    async def merge_route(self, primary: str, cands, timeout=None):
+    async def merge_prescreen(self, items, timeout=None):
+        """对 [(key, 主事实, 候选)] 一次性问「是不是同一件事」⇒ {key: 分数}。
+
+        失败 / 未启用 ⇒ None（调用方据此**照常调大模型** ✓ 绝不误跳）
+        """
+        if not items or not self.ready:
+            return None
+        if not self._hit():
+            return None
+        questions = {}
+        for key, primary, cand in items:
+            questions.update(build_merge_prescreen(primary, key, cand))
+        data = await self._ask("lang: zh", questions, "merge_prescreen", timeout)
+        if not data:
+            return None
+        answers = data.get("answers") or {}
+        out = {}
+        for key, _p, _c in items:
+            score = parse_noul(answers, "same_" + key)
+            if score is None:
+                return None          # 有解析不出来的 ⇒ 不冒险，交给大模型 ✓
+            out[key] = score
+        self.calls += 1
+        return out or None
+
+    async def compress_screen(self, items, timeout=None):
+        """压缩前置筛选：对 [(key, 角色, 文本)] 一次性问「值不值得长期记」⇒ {key: 分数}。
+
+        失败 / 未启用 ⇒ None（调用方**原样放行** ✓ 绝不误跳）
+        """
+        if not items or not self.ready:
+            return None
+        if not self._hit():
+            return None
+        questions = {}
+        for key, role, text in items:
+            questions.update(build_compress_screen(key, text, role))
+        data = await self._ask("lang: zh", questions, "compress_screen", timeout)
+        if not data:
+            return None
+        answers = data.get("answers") or {}
+        out = {}
+        for key, _role, _t in items:
+            score = parse_noul(answers, "m_" + key)
+            if score is None:
+                return None                   # 解析不全 ⇒ 整批放行 ✓
+            out[key] = score
+        self.calls += 1
+        return out or None
+
+    async def merge_plan(self, items, timeout=None):
+        """**先审后生成**：对 [(key, 主事实, 候选)] 一次性问 same/new/dilute ⇒ {key: 动作}。
+
+        动作 ∈ merge / drop / keep / inherit（由 route_merge_soft 合成 ✓）
+        失败 / 解析不全 / 未启用 ⇒ None（调用方**原样放行**给大模型 ✓ 绝不误判）
+        """
+        if not items or not self.ready:
+            return None
+        if not self._hit():
+            return None
+        questions = {}
+        for key, primary, cand in items:
+            questions.update(build_merge_route_single(primary, key, cand))
+        data = await self._ask("lang: zh", questions, "merge_plan", timeout)
+        if not data:
+            return None
+        answers = data.get("answers") or {}
+        out = {}
+        for key, _p, _c in items:
+            same = parse_noul(answers, "same_" + key)
+            if same is None:
+                return None                   # 解析不全 ⇒ 不冒险，整批交回大模型 ✓
+            out[key] = route_merge_soft(same, parse_noul(answers, "new_" + key),
+                                        parse_noul(answers, "dilute_" + key) or 0.0)
+        self.calls += 1
+        return out or None
+
+    async def merge_route(self, primary: str, cands, timeout=None, hints=None):
         """逐条候选判定 merge/drop/keep。
 
         ★ 必须**一条候选一次调用**（实测：把两条近似候选放进同一次调用会互相干扰，
@@ -585,18 +728,21 @@ class Decisions:
             return None
 
         async def one(key: str, text: str):
-            data = await self._ask(
-                "lang: zh", build_merge_route_single(primary, key, text), "merge",
-                timeout)
+            hint = (hints or {}).get(key)
+            qs = build_merge_route_single(primary, key, text)
+            if hint is not None:
+                # ★ 预筛已经问过 same ⇒ 这里不再重复问（省约 1/3 的 JEV 用量 ✓）
+                qs.pop("same_" + key, None)
+            data = await self._ask("lang: zh", qs, "merge", timeout)
             if not data:
                 return key, None
             a = data.get("answers") or {}
-            same = parse_noul(a, "same_" + key)
+            same = hint if hint is not None else parse_noul(a, "same_" + key)
             new = parse_noul(a, "new_" + key)
             dil = parse_noul(a, "dilute_" + key)
             if same is None or new is None:
                 return key, None
-            return key, route_merge(same, new, dil if dil is not None else 0.0)
+            return key, route_merge_soft(same, new, dil if dil is not None else 0.0)
 
         # ★ 顺序调用（不并发）：实测并发请求会互相干扰/被上游限流，
         #   同一候选单独问 3 次结果稳定（.88/.98/.58），并发时会被判成 drop ✗
