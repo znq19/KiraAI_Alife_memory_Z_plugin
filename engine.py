@@ -360,6 +360,56 @@ def restore_compress_ids(output, aliases):
     return output
 
 
+def pair_merge_verdicts(batch, output):
+    """把模型返回的 groups 与批内各组配对 —— **按成员匹配，不按位置** ✓（2026-09-27）
+
+    为什么改：模型经常把组的**顺序换掉** ✗（也会把 target 写成别组的 id ✗）。
+    旧实现 `zip(batch, output["groups"])` 按**位置**配对 + 一有不合就
+    `raise ValueError("unknown merge id")` ⇒ **整批判废** ✗
+      ⇒ 退化成"原文拼接"（丢信息 ✗）⇒ 之后还得重做一次（实测白烧 77 秒 ✗）
+    实测来源：用户 2026-09-27 日志 `事实合并模型输出不可用，改用原文拼接：ValueError: unknown merge id`
+
+    策略（全程只**修复**，不因个别条目炸整批 ✓）：
+      ① 用 verdict.target_id 命中哪一组 ⇒ 就配那一组 ✓
+      ② target 不认识 ⇒ 用 source_ids 与哪组交集最多 ⇒ 配那一组 ✓
+      ③ 仍配不上 ⇒ 返回 None（调用方按"整组默认合并"兜底 ✓）
+      再逐条修复 verdict：
+        · 去掉不属于该组的 id ✓（幻想的 id 直接丢 ✗ 不让它毁掉整批 ✓）
+        · target 不认识/为空 ⇒ 取该组最新一条 ✓
+    """
+    remaining = list(batch or [])
+    pairs = []
+    for verdict in (output or {}).get("groups", []) or []:
+        verdict = dict(verdict or {})
+        target = verdict.get("target_id")
+        srcs = set(verdict.get("source_ids") or [])
+        group = None
+        if target is not None:                       # ① 按 target 命中 ✓
+            for g in remaining:
+                if any(r["id"] == target for r in g):
+                    group = g
+                    break
+        if group is None and srcs:                   # ② 按 source 交集最多 ✓
+            best, best_n = None, 0
+            for g in remaining:
+                n = len(srcs & {r["id"] for r in g})
+                if n > best_n:
+                    best, best_n = g, n
+            group = best if best_n else None
+        if group is not None:
+            remaining.remove(group)
+            ids = {r["id"] for r in group}
+            newest = sorted(group, key=lambda r: (-r["time"], r["id"]))[0]["id"]
+            verdict["source_ids"] = [i for i in verdict.get("source_ids") or []
+                                     if i in ids]                 # 去掉不认识的 id ✓
+            if verdict.get("target_id") not in ids:
+                verdict["target_id"] = newest                     # target 兜底 ✓
+            if newest not in verdict["source_ids"]:
+                verdict["source_ids"] = [newest] + verdict["source_ids"]
+        pairs.append((group, verdict))
+    return pairs
+
+
 def restore_group_ids(output, aliases):
     """把合并输出里的短别名（g1-2 / d1）还原成真实 id；未知 id 交给重试路径。"""
     if not aliases:
@@ -2038,15 +2088,17 @@ class Engine:
                     logger.info("[记忆·Z] JEV·合并 先审：本批无需大模型（省一次大调用）")
                     output = {"groups": []}
                 output = restore_group_ids(output, group_aliases)
-                if len(output["groups"]) != len(batch):
+                # ★ 2026-09-27：**按成员匹配 + 逐条修复**，不再按位置 zip ✗
+                #   （模型换序/写错 target 都不该毁掉整批 ⇒ 更不该退化成"原文拼接" ✗）
+                pairs = pair_merge_verdicts(batch, output)
+                if len(pairs) != len(batch):
                     raise ValueError("merge group count mismatch")
                 verdicts = []
-                for group, verdict in zip(batch, output["groups"]):
-                    ids = {row["id"] for row in group}
-                    if verdict["target_id"] not in ids or not set(
-                        verdict["source_ids"]
-                    ) <= ids:
-                        raise ValueError("unknown merge id")
+                for group, verdict in pairs:
+                    if group is None:                     # 实在配不上 ⇒ 整组默认合并 ✓
+                        group = batch[len(verdicts)] if len(verdicts) < len(batch) else None
+                        if group is None:
+                            raise ValueError("unknown merge id")
                     verdicts.append((group, verdict))
             except Exception as exc:
                 # Force-merge policy: never leave near-duplicates behind, so a
