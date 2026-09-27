@@ -2939,17 +2939,14 @@ class Engine:
                 await self.store.call(
                     "finish", job["id"], "failed", failure_detail(exc)
                 )
+                # ★ 2026-09-27：日志也带上**可读原因** ✓
+                #   旧写法只给类名 ⇒ "KeyError" / "ValueError" 完全无法排查 ✗
+                #   （`failure_detail()` 早就写好了"只给类名等于没说" ✓ 却只用在任务列表 ✗）
+                #   实测：分类任务失败只打「KeyError」⇒ 用户只能看到"归类没生效" ✗
                 logger.warning(
                     "[记忆·Z] 后台任务失败 %s · %s，耗时 %.1f 秒；源记忆保留",
                     job["kind"],
-                    (
-                        type(exc).__name__
-                        + (
-                            " · " + exc.diagnostic
-                            if isinstance(exc, OutputRejected)
-                            else ""
-                        )
-                    ),
+                    failure_detail(exc),
                     time.monotonic() - started,
                 )
 
