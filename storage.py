@@ -42,22 +42,6 @@ CAPTURE_SCRUB_VERSION = "2"
 class Conflict(ValueError):
     pass
 
-def _classify_source_still_valid(row, current):
-    """归类守卫：源记录被并发"整理"过时，这次判定还算不算数？
-
-    · 正文一字未改（只是别的任务补了 search_body / bump 了 revision）⇒ 采纳 ✓
-    · 记录已被压缩/提炼归档（active=0 或已生成 summary）⇒ 采纳 ✓
-      （归类要的正是**原始内容里的长期事实**，被整理不影响它的正确性）
-    · 正文被实质改写成别的内容 ⇒ 拒绝 ✗（避免把 A 的判定贴到 B 上）
-    """
-    if (current["content"] or "") == (row.get("content") or ""):
-        return True
-    if not current["active"] or str(current["summary"] or "").strip():
-        return True
-    return False
-
-
-
 def uid():
     return uuid.uuid4().hex
 
@@ -4218,28 +4202,6 @@ class Store:
             for row in rows:
                 result.setdefault(row["target"], []).append(dict(row))
             return result
-
-    def classify(self, row, output):
-        with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            current = db.execute(
-                "SELECT revision,deleted,active,content,summary FROM records WHERE id=?",
-                (row["id"],),
-            ).fetchone()
-            # v2.18.74：★ 守卫语义化 —— 以前死抠 revision 相等 ✗，
-            # 而模型调用要好几秒，期间「分层压缩/提炼归档/清理」都会 bump revision
-            # ⇒ 归类几乎每次都 Conflict 判死 ✗（用户实测：记忆归类总是失败 ✗）
-            # 现在：真的没了/被删才拒；只是被"整理"过（正文没被换成别的内容）就采纳 ✓
-            if not current or current["deleted"]:
-                raise Conflict("classification source changed")
-            stale = current["revision"] != row["revision"]
-            if stale and not _classify_source_still_valid(row, current):
-                raise Conflict("classification source changed")
-            for fact in output["facts"]:
-                if set(fact["source_ids"]) != {row["id"]}:
-                    raise ValueError("unknown classification source")
-                self._add_fact(db, row["sid"], fact)
-            self.bump(db)
 
     def audit(self, candidates, output, job_id=""):
         by_id = {r["id"]: r for r in candidates}

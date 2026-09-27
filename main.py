@@ -3869,14 +3869,14 @@ class AlifeMemoryPlugin(BasePlugin):
             value.importance,
             value.category,
         )
-        await self.engine.enqueue("classify", record_id)
-        if self.settings.permanent_dedupe:
-            await self.engine.enqueue("dedupe", value.sid, automatic=True)
+        # ★ 2026-09-27（用户方案）：写入时只入**一个**任务，内部串行 ✓
+        #   链路：相似合并 → 整理（含提炼事实）→ 再合并 → 事实合并 ✓
+        #   为何不再并发：三者同时跑会重复提取 ✗，甚至 dedupe 抢先把记录合并走
+        #   ⇒ 归类时"来源已变" ⇒ **提取不到** ✗（用户实测担心 ✓）
         if self.settings.permanent_tidy_on_write:
-            # 刚写下的永久记忆也顺手过一遍整理（提炼成事实/确认是否真该常驻 ✓）
-            # 开销小：刚写入的那条本来就是待整理项，旧记录在 permanent_tidy_days 内会被跳过 ✓
-            # bot 自己写下的永久记忆、顺手整理 ⇒ 属于"**有发起方**"✓ 要有日志 ✓
             await self.engine.enqueue("tidy", value.sid, automatic=False)
+        elif self.settings.permanent_dedupe:
+            await self.engine.enqueue("dedupe", value.sid, automatic=True)
         return self.recall_result(
             event, {"ok": True, "id": await self.store.call("short_id", record_id)}
         )
@@ -4659,7 +4659,14 @@ class AlifeMemoryPlugin(BasePlugin):
             end,
             value.importance if value.importance is not None else 8,
         )
-        await self.engine.enqueue("classify", record_id)
+        # ★ 2026-09-27（用户方案）：写入时只入**一个**任务，内部串行 ✓
+        #   链路：相似合并 → 整理（含提炼事实）→ 再合并 → 事实合并 ✓
+        #   为何不再并发：三者同时跑会重复提取 ✗，甚至 dedupe 抢先把记录合并走
+        #   ⇒ 归类时"来源已变" ⇒ **提取不到** ✗（用户实测担心 ✓）
+        if self.settings.permanent_tidy_on_write:
+            await self.engine.enqueue("tidy", value.sid, automatic=False)
+        elif self.settings.permanent_dedupe:
+            await self.engine.enqueue("dedupe", value.sid, automatic=True)
         return {"id": record_id}
 
     @register.api(method="GET", path="/trash", auth=True)

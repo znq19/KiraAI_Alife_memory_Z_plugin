@@ -152,11 +152,16 @@ COMPACT_SCHEMAS = {
         '            "keep_content": str?, "reason": str}]}\n'
         '**只有 items 一个顶层键** —— 不要回写输入的 cap/budget/who 等字段 ✗\n'
         '必填：id（逐字复制 p1/p2…）、action、reason。\n'
-        '可选：category / importance（keep 时可修正）；facts（extract/split 用，≤6 条）；'
+        '可选：category / importance（keep 时可修正）；facts（**仅 extract/split 用**，≤6 条）；'
         'keep_content（仅 split 用，≤16000 字，只留必须每轮在场的那段约束）。\n'
-        'facts[].source_ids 填这条记忆自己的 id；subject 用 who 表的稳定实体 ID。\n'
+        'facts[].source_ids **逐字填这条记忆自己的 id**（p1/p2…）；subject 用 who 表的稳定实体 ID。\n'
+         '**keep/archive 不给 facts**（前者每轮在场、后者不再需要）。'
+         'facts[].category 只能是 event/fact/preference/commitment/relationship/profile/resource/self；'
+         'content ≤60 字、reason ≤40 字、scenario ≤20 字。'
+         '所有自然语言字段一律用**中文**（category 除外）。\n'
         '上限：items ≤50、category ≤40 字、reason ≤40 字。\n'
         '字段白名单：只允许上面出现过的键，多任何一个都会被拒。\n'
+        '**不需要的键直接省略**，不要写 null（写 null 会被拒 ✗）。\n'
         '常见错误（会被拒）：编造不存在的 id（必须出现在输入里）；多写输入字段；'
         'split 却不给 keep_content；把 must-keep 的约束也 archive 掉。'
     ),
@@ -2342,6 +2347,13 @@ class Engine:
         cfg = self.settings()
         if not cfg.permanent_tidy_enabled:
             return 0
+        # ★ 2026-09-27（用户方案）：**先合并相似永久记忆** ✓
+        #   整理要在更小更干净的集合上判断 ⇒ 提炼/移出更准、输入 token 更少 ✓
+        if getattr(cfg, "permanent_dedupe", False):
+            try:
+                await self.consolidate(sid)
+            except Exception:                       # noqa: BLE001
+                logger.debug("[记忆·Z] 整理前的相似合并失败（继续整理）", exc_info=True)
         if force:
             # 防抖：同一会话 10 秒内只允许强制整理一次 ✓
             now = time.time()
@@ -2404,6 +2416,18 @@ class Engine:
             #   正常 tidy ⇒ 走 _TIDY_ACTIONS_ALL ⇒ 指令与行为**一个字节都不变** ✓
             forced=rebuild,   # ★ 强制 ⇒ 用自洽清单（只有 extract/archive ✓）
         )
+        # ★ 2026-09-27（用户方案）：整理**之后再合并一次** ✓
+        #   tidy 可能拆开/归档某条 ⇒ 集合变了 ⇒ 可能出现新的相似对 ✓
+        if getattr(cfg, "permanent_dedupe", False):
+            try:
+                await self.consolidate(sid)
+            except Exception:                       # noqa: BLE001
+                logger.debug("[记忆·Z] 整理后的相似合并失败", exc_info=True)
+        # ★ 事实合并放**最后** ✓：等事实都写完再合并，避免合并到半成品 ✓
+        try:
+            await self.enqueue("fact_merge", sid, automatic=True)
+        except Exception:                           # noqa: BLE001
+            logger.debug("[记忆·Z] 触发事实合并失败（不影响整理）", exc_info=True)
         return await self.apply_tidy(sid, candidates, aliases, names, output, job_id)
 
     async def apply_tidy(self, sid, candidates, aliases, names, output, job_id=None):
@@ -2460,6 +2484,11 @@ class Engine:
                     logger.warning("[记忆·Z] 整理未应用（记录变化频繁）：%s", record_id)
             facts = []
             for fact in verdict.get("facts", []):
+                # ★ 2026-09-27：**动作白名单** —— 只收 extract/split 的事实 ✓
+                #   指令写了"keep/archive 不给 facts" ✓ 但模型不保证守 ✗ ⇒ 落库再拦一道 ✓
+                if str(verdict.get("action") or "") not in ("extract", "split"):
+                    logger.debug("[记忆·Z] 忽略 %s 动作附带的事实", verdict.get("action"))
+                    break
                 facts.append(
                     {
                         "category": fact["category"],
@@ -2769,7 +2798,6 @@ class Engine:
                     pass
                 continue
             started = time.monotonic()
-            job_started = time.time()
             # ⚠️ **自动任务不打"开始"行** ✗✓（2026-09-18 用户实测：空转的自动任务只剩这一行刷屏 ✓）
             # 原因：**开始时还不知道会不会空转** ✗ ⇒ 打了就收不回 ✓
             # ⇒ 自动任务只在**完成**时打一行：真干活可见 ✓ 空转被静默规则删掉 ✓✓
@@ -2803,94 +2831,6 @@ class Engine:
                     # 提炼/移出判断更准、输入 token 更少 ✓（没合并就不跟，避免空转 ✗）
                     if merged > 0 and cfg.permanent_tidy_enabled:
                         await self.enqueue("tidy", job["sid"], automatic=True)
-                elif job["kind"] == "classify":
-                    row = await self.store.call("get", job["sid"])
-                    if row:
-                        # 和压缩走同一套紧凑视图：短键 + 可读时间 + 名字随行，
-                        # 真实 id 只在还原时回填（此前这里直接发原始数据库行）。
-                        names = await self.name_map(row["users"])
-                        keep = await self.store.call("spaced_names")
-                        aliases = {"r1": row["id"]}
-                        payload = {
-                            "records": compress_records([row], aliases, names, keep),
-                            "context": [],
-                        }
-                        # ★ v2.18.57：归类的重试要覆盖**整条链** ✓
-                        # 以前 structured() 只重试"模型输出被拒" ✗，而归属校验在它之后
-                        # ⇒ 一次不符就判死 ✗ 一次都不重试 ✗（用户实测："好像没触发"）
-                        # 现在：照 audit 那套现成模式 ✓ 把归属校验也纳入重试 ✓
-                        for attempt in range(cfg.model_retries + 1):
-                            try:
-                                output = await self.structured(
-                                    Compression,
-                                    "compress",
-                                    payload,
-                                    cfg,
-                                    retry_timeout=False,
-                                )
-                                output = restore_compress_ids(output, aliases)
-                                wrong = [
-                                    fact
-                                    for fact in output.get("facts", [])
-                                    if set(fact.get("source_ids") or ())
-                                    != {row["id"]}
-                                ]
-                                if not wrong:
-                                    break
-                                raise OutputRejected(
-                                    'facts 的 source_ids 必须恰好是 ["r1"]'
-                                    "（这条记录自己的短别名）；这次有 %d 条不符"
-                                    % len(wrong)
-                                )
-                            except (
-                                TimeoutError,
-                                ConnectionError,
-                                ValueError,
-                            ) as exc:
-                                if (
-                                    isinstance(exc, ValueError)
-                                    and str(exc) != "structured_output_rejected"
-                                ):
-                                    raise
-                                if attempt == cfg.model_retries:
-                                    raise
-                                payload["output_feedback"] = (
-                                    "上次输出被拒绝："
-                                    + getattr(exc, "diagnostic", "契约校验失败")
-                                    + "。facts 的 source_ids 必须恰好是"
-                                    " ['r1']（这条记录自己的短别名），"
-                                    "不要留空、不要编造新 id、不要多加。"
-                                )
-                        for fact in output.get("facts", []):
-                            fact["subject"] = await self.id_for_subject(
-                                fact.get("subject", ""), names
-                            )
-                        if self.settings() == cfg:
-                            # v2.18.74：应用前**重新读一次**源记录（模型调用期间可能已被整理），
-                            # 冲突时再重试一次 ⇒ 修掉"记忆归类几乎总是失败"✗（revision 竞态）
-                            applied = False
-                            for _try in range(2):
-                                fresh = await self.store.call("get", job["sid"])
-                                if not fresh:
-                                    break
-                                row = fresh
-                                try:
-                                    await self.store.call("classify", row, output)
-                                    applied = True
-                                    break
-                                except ValueError as exc:      # Conflict ⊂ ValueError
-                                    if "classification source changed" not in str(exc):
-                                        raise
-                                    if _try:
-                                        raise
-                                    logger.info(
-                                        "[记忆·Z] 归类源记录在判定期间被整理，"
-                                        "已重读后重试一次 ✓"
-                                    )
-                            if applied:
-                                await self.queue_fact_merges(
-                                    row["sid"], job_started
-                                )
                 elif job["kind"] == "rewrite":
                     counts = await self.redo_pending_rewrites(10**6, job["id"])
                     detail = (

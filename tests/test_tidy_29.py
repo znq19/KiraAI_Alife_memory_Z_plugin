@@ -194,6 +194,10 @@ async def test_manual_tidy_runs_even_below_capacity(tmp_path):
         store.claim(kind="tidy")
         plugin.engine.last_tidy_note = ""
         await plugin.engine.tidy_permanents("qq:dm:1", job)
+        # ★ 2026-09-27：写入链在 tidy 之前会先"合并相似永久记忆" ✓
+        #   ⇒ 模型可能先被调用一次（合并的载荷没有 items ✗）⇒ 这里挑含 items 的那次 ✓
+        _tidy_calls = [c for c in called if isinstance(c, dict) and "items" in c]
+        called = _tidy_calls or called
         assert called, "没有超容量时，手动整理也必须真的请模型看一遍"
         assert called[0]["items"], "候选不该为空"
     finally:
