@@ -78,6 +78,7 @@ IMPORTANCE_OPTIONS = {
 
 
 class JevClient:
+    COOLDOWN = 300.0                 # ★ 熔断冷却秒数（ready/cooldown_left/面板共用同一来源 ✓）
     """最小原生客户端：同步 urllib 跑在 to_thread 里（零新增依赖，可硬超时）。
 
     ★ 熔断：连续失败 3 次 → 冷却 300 秒内直接返回 None（不再占用时间）。
@@ -93,6 +94,7 @@ class JevClient:
         self.timeout = float(timeout)
         self.fails = 0
         self.opened_at = 0.0
+        self.last_error = ""      # ★ 面板状态灯用：最近一次失败原因 ✓（只留 200 字 ✓）
         self.tokens = 0
         self.last_trigger: Optional[float] = None          # 累计输入 token（面板可观测）
 
@@ -101,18 +103,36 @@ class JevClient:
     def ready(self) -> bool:
         if not self.api_key:
             return False
-        if self.fails >= 3 and (time.time() - self.opened_at) < 300:
+        if self.fails >= 3 and (time.time() - self.opened_at) < self.COOLDOWN:
             return False
         return True
 
     def _ok(self) -> None:
         self.fails = 0
 
-    def _bad(self) -> None:
+    def _bad(self, err: str = "") -> None:
         self.fails += 1
-        if self.fails == 3:
+        if err:
+            self.last_error = str(err)[:200]
+        if self.fails >= 3:
+            # ★ 2026-09-29（实测修）：这里以前是 `== 3` ✗
+            #   ⇒ 首次冷却 300 秒到期后，若服务**仍然不可用**，fails 继续涨（4/5/6…）✗
+            #     而 opened_at 再也不刷新 ⇒ ready 恒为 True ⇒ **熔断再也不会开启** ✗
+            #   ⇒ 后果：此后**每次**符合条件的调用都真去打一次接口 ✗
+            #     超时型故障（服务挂了/DNS 黑洞，最常见）下每次白付 jev_timeout_ms ✗
+            #   改成 `>= 3`：每次失败都让冷却从当前时刻**重新计时** ✓（教科书式熔断 ✓）
+            #   日志仍只在首次失败 3 次时打一条 ✓（避免刷屏 ✗）
             self.opened_at = time.time()
-            logger.warning("JEV 连续失败 3 次，冷却 300 秒（期间自动走原逻辑）")
+            if self.fails == 3:
+                logger.warning("JEV 连续失败 3 次，冷却 300 秒（期间自动走原逻辑）")
+
+    @property
+    def cooldown_left(self) -> int:
+        """熔断剩余冷却秒数（0 = 未熔断 ✓）。面板状态灯用 ✓"""
+        if self.fails >= 3:
+            left = self.COOLDOWN - (time.time() - self.opened_at)
+            return int(left) if left > 0 else 0
+        return 0
 
     # ---------- 同步实现 ----------
     def _post_sync(self, payload: dict, timeout: float) -> Optional[dict]:
@@ -141,7 +161,7 @@ class JevClient:
                 asyncio.to_thread(self._post_sync, payload, limit), timeout=limit + 0.5
             )
         except Exception as exc:  # noqa: BLE001  —— 契约：任何失败都不得外泄
-            self._bad()
+            self._bad(str(exc))
             logger.info(f"JEV 调用未成功，本轮走原逻辑：{type(exc).__name__}")
             return None
         if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
@@ -568,6 +588,35 @@ class Decisions:
     @property
     def ready(self) -> bool:
         return bool(self._client and self._client.ready)
+
+    def status(self) -> dict:
+        """面板状态灯用的**只读**快照 ✓（不发起任何网络调用 ✗ 也不抛异常 ✗）"""
+        cfg, c = self.cfg, self._client
+        enabled = bool(getattr(cfg, "enabled", False))
+        has_key = bool(getattr(cfg, "api_key", "") or getattr(cfg, "uuid", ""))
+        base = getattr(cfg, "base_url", "") or ""
+        if not enabled:
+            why = "未启用"
+        elif not has_key:
+            why = "未选择类 JEV 决策模型，且未填接口密钥"
+        elif not base:
+            why = "接口地址为空"
+        elif c is not None and getattr(c, "cooldown_left", 0):
+            why = "连续失败 %d 次，冷却中（剩余 %d 秒）" % (c.fails, c.cooldown_left)
+        elif not self.ready:
+            why = "客户端不可用"
+        else:
+            why = ""
+        return {
+            "enabled": enabled,
+            "ready": bool(self.ready),
+            "why": why,
+            "model": getattr(cfg, "model", "") or "",
+            "has_key": has_key,
+            "fails": int(getattr(c, "fails", 0) or 0),
+            "cooldown_left": int(getattr(c, "cooldown_left", 0) or 0),
+            "last_error": str(getattr(c, "last_error", "") or "")[:160],
+        }
 
     @property
     def tokens(self) -> int:

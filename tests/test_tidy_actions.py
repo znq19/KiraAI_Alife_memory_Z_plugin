@@ -186,6 +186,8 @@ async def test_tidy_all_queues_when_session_has_single_permanent(tmp_path):
           ⇒ 若每个会话只有**1 条**常驻 ⇒ 列表为空 ⇒ **一个任务都不入队** ✗
     修：整理改用 `min_count=1` ✓（合并仍保持 ≥2 ✓）
     """
+    if not os.environ.get("KIRA_CORE"):
+        pytest.skip("需要 KIRA_CORE 宿主框架")
     store = storage_mod.Store(tmp_path / "q.db")
     store.initialize()
     cfg = contracts.Settings()

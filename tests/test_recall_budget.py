@@ -186,6 +186,8 @@ def _fact_lines(text):
 
 @pytest.mark.asyncio
 async def test_jev_on_never_injects_more_facts_than_off(tmp_path):
+    if not os.environ.get("KIRA_CORE"):
+        pytest.skip("需要 KIRA_CORE 宿主框架")
     main = importlib.import_module("alife_rbudget.main")
     common = dict(enabled=True, recall_scope="global", audit_enabled=False,
                   fact_merge_enabled=False, proactive_enabled=False,
@@ -269,6 +271,8 @@ async def test_jev_off_strict_and_loose_inject_identically(tmp_path):
       否则它会去截**轮换槽的 +3** ✗（那是关 JEV 时本来的行为 ✗）
     实测踩到：上限最初**没有 JEV 前置条件** ✗（本轮修 ✓）
     """
+    if not os.environ.get("KIRA_CORE"):
+        pytest.skip("需要 KIRA_CORE 宿主框架")
     common = dict(enabled=True, recall_scope="global", audit_enabled=False,
                   fact_merge_enabled=False, proactive_enabled=False,
                   permanent_tidy_enabled=False, tidy_rebuild_bot_enabled=False)

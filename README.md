@@ -456,6 +456,60 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
 - 成本杠杆 ✓：`compress_model`（可指便宜模型）+ 限流 + 幂等键（轮末记录 id ✓）
 - **明确不做** ✗：命中就调模型 ✗；让启发式**直接写永久记忆** ✗（会绕过审计/合并/去重 ✓）
 
+### v2.21.3
+- 🐛 **修「面板删不掉记忆」**（用户实测：KiraOS 迁移过来的记忆点了「确认删除」没反应 ✗）
+  · 根因：`store.edit` 用 `old["revision"] != revision` 做乐观锁 ✓，而「跳过版本比对」的**契约**
+    是调用方（`main.edit_skip_revision`）把 `revision` 置为 `None` ✗ —— 比对那行却没处理 `None` ✗
+    ⇒ **`None` 永远不等于任何版本号** ⇒ 必然 `Conflict` ⇒ HTTP 409 ✗
+  · 影响面（全部真跑复现 ✗→✓）：**纯删除**（面板「确认删除」）✗、**「以我的版本覆盖」** ✗、
+    **AI 工具 `correct()`**（默认不带版本号 ✗）、体检页快捷操作 ✗、回收站还原 ✗
+  · 修：`if revision is not None and old["revision"] != revision` ✓
+    —— 与同仓库 `names` 路径（storage.py:1184）**本来就这么写**的写法对齐 ✓
+  · 传了**真实版本号**的编辑仍严格比对 ✓（新增反向用例守护：「过期且没点覆盖」必须仍 409 ✓）
+- 🐛 **修体检页「重要度 ±1」必然 422**：facts 白名单漏了 `importance`
+  （`record` 白名单有 ✗ 两边不对称 ✗）
+  · 修：facts 白名单补 `importance` ✓（其余非法字段仍然拒绝 ✓ 有用例守 ✓）
+- 🐛 **修体检页两个快捷操作漏传契约必填 `reason`** ⇒ 422 ✗ + 前端只弹 3.5 秒就消失的误导提示 ✗
+- 🐛 **修前端按钮显隐两处缺口**：记录详情不管理 `#delete`（从「新增记忆」流程后进来可能**没有删除按钮** ✗）；
+  `#reextract` 由记录详情动态创建、事实页/新增页不收起 ⇒ 残留且 `onclick` 仍是旧闭包 ⇒ 点了**发错任务** ✗
+- 🧪 **修 23 条假失败**（不带宿主跑全量时 ✗）：`tests/test_rotate_budget.py` 模块级
+  `os.environ.setdefault("KIRA_CORE", ...)` 把一个**可能不可用**的路径泄漏给整个 pytest 会话 ✗
+  ⇒ 后面每个 `if os.environ.get("KIRA_CORE")` 的宿主用例都以为有宿主 ⇒ 集体 ModuleNotFoundError ✗
+  · 修：必须**验证框架真能导入**（`core/plugin.py` 在 ✓）才注入；否则保持未设置（正常 skip ✓）
+    —— 注意「目录存在」≠「可用」✗（实测 `/tmp/kiraai_latest` 存在但缺 `core/plugin.py` ✗）
+  · 另有 3 条**没有守卫**的宿主用例（`test_recall_budget` ×2 / `test_tidy_actions` ×1）补 `pytest.skip` ✓
+- 🧪 **修 prewarm 用例**（带宿主时 1 failed ✗）：合成事件默认 `process_strategy="discard"`，
+  而钩子**按设计提前返回**（bot 明确不会回应就不预热 ✓ 省钱优化 ✓）⇒ 该用例根本没走到它要回归的
+  「读消息」分支 ✗（`_memo` 必然为空 ✗）
+  · 修：用宿主**真实 API** `event.buffer()` ✓（`process_strategy` 是**只读 property** ✗ 不能直接赋值 ✗）
+  · 新增用例守住「discard ⇒ 不预热」（这条行为此前**没有用例**守 ✓）
+- ✨ **前端 P2 健壮性**：画像卡片 `tags` / `sources` 兜底 ✓；`openProfile` 先清 `profileData`
+  （否则 GET /profile 404 时会把**上一个实体**的旧数据留给「改名字」✗）；冷归档记录保存摘要明确提示
+  「正文要用**取回**」✓（否则用户以为改了正文 ✗）；配置保存非 409 失败时状态条写
+  「保存失败：未生效」✓（以前会留着「已保存，配置立即生效」✗ 误导 ✓）
+- ✅ 新增 `tests/test_delete_revision_skip.py`（11 条 ✓ 与 `tests/test_jev_breaker.py` 7 条 ✓ **默认可跑**、不依赖宿主）：
+  纯删除（新鲜 / 过期 revision）✓ force 覆盖 ✓ **反向保护（过期无 force 必须 409）** ✓
+  目标不存在仍拒 ✓ 还原 ✓ facts 重要度 / 删除 ✓ + 3 条结构判据（`/edit` 必须能拿到 `reason` ✓
+  记录详情必须管 `#delete` ✓ P2 四处兜底在位 ✓）
+- 🐛 **修 JEV 熔断器首次冷却后永不重开**：`_bad()` 里写的是 `if self.fails == 3:` ✗
+  ⇒ 冷却 300 秒到期后若服务**仍不可用**，fails 继续涨但 `opened_at` 再也不刷新 ✗
+  ⇒ `ready` 恒为 True ⇒ **熔断再也不会开启** ✗ ⇒ 此后每次调用都白付 `jev_timeout_ms` ✗
+  · 修：`>= 3`（每次失败都让冷却**重新计时** ✓ 教科书式熔断 ✓）；日志仍只在首个 3 次打一条 ✓
+  · 另把冷却秒数提取为 `JevClient.COOLDOWN` 常量 ✓（ready / cooldown_left / 面板共用一处来源 ✓）
+- ✨ **新增面板「JEV 状态小灯」**：以前 JEV 开没开、是否就绪、是不是正熔断**只能翻日志** ✗
+  · 后端：`JevClient.last_error`（最近失败原因 ✓）+ `cooldown_left`（熔断剩余秒 ✓）+
+    `Decisions.status()`（**只读快照** ✓ 字段：enabled/ready/why/model/has_key/fails/cooldown_left/last_error ✓
+    **绝不发起网络调用** ✗ 也绝不抛 ✗）⇒ `api_status` 暴露为 `status["jev"]` ✓
+  · 前端：状态区 `#jevTag`（**写在 HTML 里** ✓ 与 v2.18.7 对 #capTag/#recallTag 的处理一致 ✓）
+    三态：`JEV 就绪 | <模型>` ✓ / `JEV 熔断中 | 剩余 Ns` ✓ / `JEV 未就绪` ✓；悬停看原因与上次失败 ✓
+  · 真跑：熔断态 ⇒ `ready=False fails=3 cooldown_left=299 why='连续失败 3 次，冷却中（剩余 299 秒）'
+    last_error='connection refused'` ✓
+- 📊 测试（终版，全部真跑）：
+  · 不带宿主：**866 passed / 0 failed / 27 skipped** ✓（改前 848 passed / **23 failed** ✗）
+  · 带宿主：**953 passed / 0 failed** ✓（改前 943 passed / **1 failed** ✗）
+  · 反向验证：修复前同一套真 handler 矩阵 **6/7 红** ✗ ⇒ 修复后 **7/7 绿** ✓
+- 📄 详见 `docs/PANEL_EDIT_DELETE_2_21_3.md`
+
 ### v2.21.2
 - 🐛 **修「一组事实合并整组白跑」**（实测：明细只留一句"合并失败…已恢复可见，稍后自动重试"）
   · 根因：应用前会**重读这一组**拿最新 revision，但判断写成了「条数一致才用新数据」✗

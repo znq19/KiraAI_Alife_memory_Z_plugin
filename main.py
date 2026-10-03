@@ -4364,6 +4364,12 @@ class AlifeMemoryPlugin(BasePlugin):
         status["version"] = await asyncio.to_thread(self._plugin_version)
         status["search_index"] = await self.store.call("search_index_state")
         status["capacity"] = await self.store.call("capacity_stats")
+        # ★ 2026-09-29：JEV 状态（面板小灯 ✓）—— **只读**快照 ✓ 不触发任何调用 ✗ 也绝不抛 ✗
+        try:
+            status["jev"] = (self.decisions.status() if self.decisions is not None
+                             else {"enabled": False, "ready": False, "why": "JEV 决策层未构建"})
+        except Exception:
+            status["jev"] = {"enabled": False, "ready": False, "why": "JEV 状态读取失败"}
         # v2.18 第6项：召回用量（每次工具返回的次数与字符数）—— 用来判断"工具是否被频繁调用/返回是否过大"
         usage = getattr(self, "_recall_stats", None) or {}
         # v2.18 第6项：审计侧计数（轮次 / 本轮涉及会话数 / 上次轮询时间 / 今日调用数）

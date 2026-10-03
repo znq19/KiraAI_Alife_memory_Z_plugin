@@ -1859,6 +1859,12 @@ async def test_prewarm_hook_accepts_single_message_event(tmp_path):
     plugin, store = await build_plugin(tmp_path)
     try:
         event = make_single_event()
+        # ★ 2026-09-29：宿主对「bot 不会回应」的消息给 process_strategy="discard"，
+        #   钩子会**按设计提前返回** ⇒ 那样根本没走到本用例要回归的「读消息」分支 ✗
+        #   ⇒ 用宿主真实 API event.buffer() 把它标成「要进缓冲」✓
+        #   （process_strategy 是只读 property ✗ 不能直接赋值 ✓）
+        event.buffer()
+        assert event.process_strategy == "buffer"
         await plugin.on_message_prewarm(event)  # 修复前这里抛 AttributeError
         # 预热键必须落在真实会话上（单条事件没有 .sid，得走 .session.sid）
         assert plugin._prewarm_seen.get(event.session.sid)
@@ -1879,6 +1885,26 @@ async def test_prewarm_hook_accepts_single_message_event(tmp_path):
         ) in plugin._memo
         # 两种事件形态取到同一份用户 id（预热缓存键要对得上注入时的键）
         assert module.user_ids(event) == module.user_ids(make_event()) == ["test:u"]
+    finally:
+        await plugin.terminate()
+
+
+@pytest.mark.asyncio
+async def test_prewarm_skipped_when_host_will_discard(tmp_path):
+    """宿主标了 discard（bot 明确不会回应）⇒ 预热钩子必须**直接返回** ✓
+
+    这是用户实测的省钱优化：群聊里大多数消息 bot 都不回，
+    若每条都预热（尤其要花钱的 JEV 预取）就是纯烧钱 ✗
+    """
+    from test_helpers_plugin import build_plugin
+
+    plugin, store = await build_plugin(tmp_path)
+    try:
+        event = make_single_event()
+        assert event.process_strategy == "discard"  # 新建事件的默认态 ✓
+        await plugin.on_message_prewarm(event)
+        await asyncio.sleep(0.3)
+        assert not plugin._memo, "discard 的消息不该产生预热缓存 ✓（省钱 ✓）"
     finally:
         await plugin.terminate()
 

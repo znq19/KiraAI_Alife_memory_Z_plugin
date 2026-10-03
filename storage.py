@@ -2714,6 +2714,10 @@ class Store:
                 "scenario",
                 "tags",
                 "relations",
+                # ★ 2026-09-29（用户实测）：事实体检页「重要度 ±1」打的正是这个字段 ✗
+                #   以前 facts 白名单漏了它 ⇒ /edit 必然 422 "invalid editable fields" ✗
+                #   同函数的 record 白名单早就允许 importance ✓ 两边对齐 ✓
+                "importance",
                 "deleted",
             }
         )
@@ -2724,7 +2728,14 @@ class Store:
             old = db.execute(
                 f"SELECT * FROM {table} WHERE id=?", (target,)
             ).fetchone()
-            if not old or old["revision"] != revision:
+            if not old:
+                raise Conflict("record changed; reload before saving")
+            # ★ 2026-09-29（用户实测）：**纯删除 / force 覆盖**走的是「跳过版本比对」✓
+            #   契约：调用方（main.edit_skip_revision）把 revision 置为 None 表示跳过 ✓
+            #   以前这里写 `old["revision"] != revision` ⇒ None 永远不相等 ✗
+            #   ⇒ 前端「确认删除」「以我的版本覆盖」**必然 409** ✗（用户：「删不掉」✗）
+            #   同仓库的 names 路径（storage.py:1184）本来就是 `revision is not None and ...` ✓
+            if revision is not None and old["revision"] != revision:
                 raise Conflict("record changed; reload before saving")
             # v2.18.66：撤回后**还原**必须可行 ✗ —— 以前这里写死 `AND deleted=0` ✗
             # ⇒ 已删除/已撤回的那条永远查不到 ⇒ 走「还原」必然 Conflict ✗（真跑踩到 ✓）

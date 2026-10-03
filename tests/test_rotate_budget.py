@@ -19,7 +19,29 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
-os.environ.setdefault("KIRA_CORE", "/tmp/kiraai_latest")
+# ★ 2026-09-29：以前这里无条件 setdefault 一个**可能不存在**的路径 ✗
+#   ⇒ 它会泄漏给整个 pytest 会话 ⇒ 后面每个「if os.environ.get("KIRA_CORE")」
+#     的宿主用例都以为有宿主 ⇒ 全体 ModuleNotFoundError ✗（实测 23 条假失败 ✗）
+#   ⇒ 只有该路径**真的存在**时才注入 + 设置 ✓ 否则保持未设置（宿主用例正常 skip ✓）
+#   ★ 2026-09-29 二次修正："目录存在"不等于"能用" —— 实测 /tmp/kiraai_latest 存在但
+#     缺 core/plugin.py ⇒ 注入后 23 个宿主用例照样 ModuleNotFoundError ✗
+#     ⇒ 必须**验证框架真的可导入**（core/plugin.py 在）才注入 ✓ 否则保持未设置（正常 skip ✓）
+def _usable_core(path: str):
+    return bool(path) and os.path.isfile(os.path.join(path, "core", "plugin.py"))
+
+
+_core = os.environ.get("KIRA_CORE") or ""
+if not _usable_core(_core):
+    for _cand in ("/tmp/kiraai_latest", "/tmp/kiraai-src"):
+        if _usable_core(_cand):
+            _core = _cand
+            break
+    else:
+        _core = ""
+if _core:
+    os.environ.setdefault("KIRA_CORE", _core)
+    if _core not in sys.path:
+        sys.path.insert(0, _core)
 
 mod = None
 
