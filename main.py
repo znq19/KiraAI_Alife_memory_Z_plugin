@@ -4863,8 +4863,13 @@ class AlifeMemoryPlugin(BasePlugin):
                 display, legacy = self._model_entry_name(str(mid), entry)
             except Exception:
                 display, legacy = str(mid), ""
+            _pn = str(pname or "").strip()
+            if not _pn:
+                # 名字找不到时：短且可读的 pid 才用 ✓，否则给个可读占位 ✓（绝不吐 UUID ✗）
+                _ps = str(pid or "").strip()
+                _pn = _ps if (_ps and len(_ps) <= 22 and _ps.count("-") < 4) else "未知提供商"
             result.append({"id": key, "name": display, "model": display,
-                           "provider": pname or pid, "kind": kind,
+                           "provider": _pn, "kind": kind,
                            "legacy": legacy, "key": str(mid), "src": src})
 
         # `provider_mgr` / `kira_config` 不是 PluginContext 的固定契约（框架演进过 ✓）
@@ -5025,15 +5030,29 @@ class AlifeMemoryPlugin(BasePlugin):
             pass
 
         # ★ 2026-10-12（用户实拍）：**显示名撞车**的模型要让前端能区分 ✓
-        #   （同一显示名 + 同一提供商 + 同类型 ⇒ 重名 ⇒ 补一个短标识 ✓）
-        seen = {}
+        # ★ 2026-10-15（用户实拍 3.0）：区分标识**必须可读** ✗
+        #   原来取的是 **provider id** ✗ —— 而 3.0 里 WebUI 建的 provider id 是 **UUID** ✗
+        #   ⇒ 面板上就出现 `… · commandcode goat · 13e2edf385f9…` 这种尾巴 ✓（用户截图 ✓）
+        #   ⇒ 现在：短且可读的模型 id 才用 ✓；否则用**组内序号 #n** ✓（永不吐 UUID ✓）
+        def _readable(s):
+            s = str(s or "").strip()
+            if not s or len(s) > 22:
+                return ""
+            if s.count("-") >= 4:          # UUID 形状（8-4-4-4-12）✗
+                return ""
+            return s
+
+        groups = {}
         for item in result:
             sig = (item["name"], item["provider"], item["kind"])
-            seen[sig] = seen.get(sig, 0) + 1
-        for item in result:
-            if seen[(item["name"], item["provider"], item["kind"])] > 1:
+            groups.setdefault(sig, []).append(item)
+        for sig, items in groups.items():
+            if len(items) < 2:
+                continue
+            for idx, item in enumerate(items, 1):
                 item["dup"] = True
-                item["tag"] = str(item["id"]).split(":", 1)[0] or item["key"]
+                tag = _readable(item.get("key")) or _readable(str(item["id"]).split(":", 1)[-1])
+                item["tag"] = tag or ("#%d" % idx)
         return {"models": result}
 
     async def _cold_auto_once(self, force=False):
