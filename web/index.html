@@ -10,7 +10,7 @@
     //     · 不一致 ⇒ 用真实版本强刷一次（同版本只刷一次，避免死循环 ✓）
     (function () {
       var PID = "alife_memory_z";
-      var BAKED = "2.22.17";
+      var BAKED = "2.22.18";
       try {
         var xhr = new XMLHttpRequest();
         xhr.open("GET", "/api/plugin/" + PID + "/status", false);   // 同步：几毫秒，换取"立刻正确"
@@ -49,7 +49,7 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="style.css?v=2.22.17" />
+    <link rel="stylesheet" href="style.css?v=2.22.18" />
   </head>
   <body>
     <div class="ambient" aria-hidden="true">
@@ -550,7 +550,7 @@
     </dialog>
     <div id="toast" class="hide" role="status"></div>
     <script src="/plugin-bridge.js"></script>
-    <script src="graph.js?v=2.22.17"></script>
-    <script src="app.js?v=2.22.17"></script>
+    <script src="graph.js?v=2.22.18"></script>
+    <script src="app.js?v=2.22.18"></script>
   </body>
 </html>

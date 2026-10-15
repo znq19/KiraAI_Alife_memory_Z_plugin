@@ -575,8 +575,9 @@ def test_model_options_show_provider_name():
     main = (ROOT / "main.py").read_text(encoding="utf-8")
     # 2026-10-15：`api_models` 重写为"三路并集"（活注册表 + 配置字典 + 默认模型 ✓）
     #   ⇒ 提供商显示名改为经 `_name_of(pid)` 取、并保留"缺了回退到 pid" ✓（原意不变 ✓）
-    assert ("_name_of(pid)" in main and "pname or pid" in main) or \
-        ('provider.get("name") or pid' in main), "后端必须带提供商显示名（缺了回退到 pid）"
+    # 2026-10-15：provider 显示名改经 `_name_of(pid)` + 可读兜底（不再用 UUID 顶替 ✓）
+    assert "_name_of(pid)" in main, "后端必须带提供商显示名 ✗"
+    assert ("pname or pid" in main or "未知提供商" in main), "缺了名字时必须回退 ✓"
 
 
 def test_sidebar_nav_is_scrollable():
