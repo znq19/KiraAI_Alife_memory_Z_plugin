@@ -182,6 +182,9 @@ class JevClient:
         ]
         last_exc = None
         for idx, (url, key, model_name) in enumerate(links, 1):
+            # ★ 2.22.23：每档都规整成 /v1/systemone（幂等）。旧实现只规整主档，
+            #   回退档直接 POST base_url（如 .../v1）⇒ 404/Cloudflare。
+            url = endpoint_of(url)
             body = dict(payload)
             if model_name:
                 body["model"] = model_name
@@ -329,18 +332,36 @@ class JevConfig:
         return client
 
 
+def _link_key(link):
+    """链档去重键：端点规整后再比（旧实现用原始 base，会和主档对不上）。"""
+    try:
+        base, key, model = link
+    except (TypeError, ValueError):
+        return tuple(link)
+    return (endpoint_of(base) if base else "", key, model)
+
+
 def _resolve_jev_chain(settings, provider_mgr, primary, primary_ref):
-    """把 `jev_models`（有序 ≤10）解析成 [(base_url, api_key, model), ...]
+    """把 `jev_models` + `jev_decision_models`（有序 ≤10）解析成 [(endpoint, api_key, model), ...]
 
     与主端点**同一套解析**（get_model_info ⇒ provider_config ⇒ base/key）⇒ 不新增概念。
     跳过：与主端点重复的档；解析不出 base/key 的档（记一条 info，不静默）。
+
+    ★ 2.22.23 修复：
+      · 模型名取 `ModelInfo.model_name`（3.x 的 mid 是内部 uuid，直接发会 403）
+      · 端点过 `endpoint_of()`（旧实现把 base_url 原样当完整 URL POST，必 404/403）
+      · 同时支持 llm 组与 3.1.1 的 decision 组（协议相同，只是分组不同）
     """
-    refs = getattr(settings, "jev_models", None) or []
-    if not isinstance(refs, (list, tuple)):
+    refs = []
+    # 两组各自 ≤10 档（合计 ≤20）：不能因为填满一组就把另一组静默丢掉
+    for name in ("jev_models", "jev_decision_models"):
+        value = getattr(settings, name, None) or []
+        if isinstance(value, (list, tuple)):
+            refs.extend(str(x or "").strip() for x in list(value)[:10] if str(x or "").strip())
+    if not refs:
         return []
-    out, seen = [], {tuple(primary)}
-    for ref in list(refs)[:10]:
-        ref = str(ref or "").strip()
+    out, seen = [], ({_link_key(primary)} if primary else set())
+    for ref in refs:
         if not ref or ref == str(primary_ref or "").strip():
             continue
         pid, mid = split_uuid(ref)
@@ -356,10 +377,12 @@ def _resolve_jev_chain(settings, provider_mgr, primary, primary_ref):
             if not base or not key:
                 logger.info("[记忆·Z] JEV 回退链跳过 %s（缺接口地址/密钥）", ref)
                 continue
-            link = (base, key, mid)
-            if link in seen:
+            model_name = str(getattr(info, "model_name", "") or "").strip() or mid
+            link = (endpoint_of(base), key, model_name)
+            k = _link_key(link)
+            if k in seen:
                 continue
-            seen.add(link)
+            seen.add(k)
             out.append(link)
         except Exception:      # noqa: BLE001
             continue
@@ -374,7 +397,8 @@ def resolve_config(settings: Any, provider_mgr: Any = None) -> JevConfig:
         value = getattr(settings, name, default)
         return default if value is None else value
 
-    uuid = str(get("jev_model")).strip()
+    # 3.1.1+：OpenAI 兼容（jev_model）与内置 TypeSafe（jev_decision_model）二选一即可
+    uuid = str(get("jev_model")).strip() or str(get("jev_decision_model")).strip()
     base = str(get("jev_base_url")).strip()
     key = _env(str(get("jev_api_key")))
     model = str(get("jev_model_name")).strip()
@@ -419,6 +443,14 @@ def resolve_config(settings: Any, provider_mgr: Any = None) -> JevConfig:
         sample = float(get("jev_sample", 1.0))
     except (TypeError, ValueError):
         sample = 1.0
+    # ★ 2.22.23：先把两类回退链解析出来（OpenAI 兼容 llm 组 + TypeSafe decision 组）
+    chain = _resolve_jev_chain(settings, provider_mgr, (base, key, model), uuid)
+    # ★ 2.22.23（用户确认）：只配了回退链（单模型/手动密钥都为空）⇒ 链首当主档。
+    #   主档填了但解析失败（提供商被删等）也走这里 ⇒ 不会“选了模型却整层不工作”。
+    if not (base and key) and chain:
+        base, key, model = chain[0]
+        chain = chain[1:]
+        logger.info("[记忆·Z] JEV 主档未配置/不可用 ⇒ 使用回退链首档（model=%s）", model)
     config = JevConfig(
         enabled=bool(get("jev_enabled", False)),
         base_url=base, api_key=key, model=model,
@@ -426,9 +458,7 @@ def resolve_config(settings: Any, provider_mgr: Any = None) -> JevConfig:
         prompt_append=get("jev_prompt_append", ""),
     )
     # ★ 2026-10-10：JEV **有序回退链**（≤10；解析不到的档自动跳过）
-    config.fallbacks = tuple(
-        _resolve_jev_chain(settings, provider_mgr, (base, key, model), uuid)
-    )
+    config.fallbacks = tuple(chain)
     return config
 
 # ────────────────── 问题构造（★两个实测踩过的坑，必须遵守）──────────────────
@@ -714,7 +744,7 @@ class Decisions:
         if not enabled:
             why = "未启用"
         elif not has_key:
-            why = "未选择类 JEV 决策模型，且未填接口密钥"
+            why = "未选择 JEV 决策模型"
         elif not base:
             why = "接口地址为空"
         elif c is not None and getattr(c, "cooldown_left", 0):

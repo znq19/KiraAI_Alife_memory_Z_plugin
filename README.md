@@ -163,9 +163,14 @@ L100 永久记忆（不参与自动压缩，只能由 Bot 主动 Memorize 或你
 
 ### 怎么开
 
-1. 「设置 → 提供商」注册一个**类 JEV 决策模型**（官方 `https://api.typesafe.ai`，或你自己的中转）
-2. 本插件设置里选中它（`jev_model`）——**请正确选择类 JEV 决策模型，误选其他将无法正常使用**
+1. 「设置 → 提供商」注册 JEV（二选一）：
+   - **3.1.1+ 推荐**：内置 **TypeSafe** 提供商（Base URL `https://api.typesafe.ai/v1` 或你的中转）+ 一个叫 `jev-latest` 的 **decision** 模型；
+   - **旧方式**：**OpenAI 兼容**提供商（base_url 带 `/v1`）+ 一个 `jev-latest` 的 llm 模型。
+2. 本插件设置里选中它：TypeSafe 用 `jev_decision_model` / `jev_decision_models`，OpenAI 兼容用 `jev_model` / `jev_models`
 3. 打开 `jev_enabled` 与需要的那几个开关（`jev_recall` / `jev_merge` / `jev_audit` / `jev_importance`）
+
+> 旧版的「手动填 JEV 接口地址 / 密钥 / 模型名」三项已移除：加载时会**清空并停用**（不会隐形生效），
+> 请改用上面的提供商方式。
 
 ### 安全保证（都可复现）
 
@@ -258,8 +263,8 @@ L100 永久记忆（不参与自动压缩，只能由 Bot 主动 Memorize 或你
 | `cold_after_days` | 180 | 多久没用到就淡出检索（只影响检索；冷归档只能按 ID 读） |
 | `memorize_cover_check` | 开 | 保存永久记忆前先查是否已被事实覆盖；能覆盖就不重复常驻 |
 | `jev_enabled` | 关 | **JEV 决策模型总开关**（可选增强）。不开时所有行为与之前完全一致 |
-| `jev_model` | 空 | 选一个类 JEV 决策模型（在「设置 → 提供商」里注册）。**误选其他将无法正常使用** |
-| `jev_base_url` / `jev_api_key` / `jev_model_name` | 空 | 高级覆盖项：不填则自动取所选提供商的地址与密钥（官方默认 `https://api.typesafe.ai`，模型 `jev-latest`） |
+| `jev_model` | 空 | OpenAI 兼容方式：选一个类 JEV 决策模型（在「设置 → 提供商」里注册） |
+| `jev_decision_model` | 空 | TypeSafe 方式（3.1.1+）：在提供商里添加 TypeSafe 与 jev-latest 决策模型后选这里 |
 | `jev_timeout_ms` | 5000 | 单次 JEV 调用预算（毫秒）。超时立即回退原逻辑，用户可自行调小/调大 |
 | `jev_sample` | 1.0 | 采样比例（1=全部）。想省额度又怕误判时逐步放量 |
 | `jev_prompt_append` | 空 | **JEV 附加指令**：追加到所有 JEV 任务的 instructions 末尾（留空=默认行为。只改正文，不改判定结构） |
@@ -469,6 +474,30 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
 - ⚠️ **尚未实测**「一次压掉已闭合的轮」这个变体 ✗（当时的模拟脚本有问题 ✓ 动手前必须先证明 ✓）
 - 成本杠杆 ✓：`compress_model`（可指便宜模型）+ 限流 + 幂等键（轮末记录 id ✓）
 - **明确不做** ✗：命中就调模型 ✗；让启发式**直接写永久记忆** ✗（会绕过审计/合并/去重 ✓）
+
+### v2.22.23 —— JEV 链修复 + 3.1.1 TypeSafe 决策模型 ✓
+
+- **JEV 回退链修复（两个必现 bug）**：
+  - 链档模型名改用 `ModelInfo.model_name`：3.x 的 `model_id` 是内部 uuid，旧实现直接当模型名发给 JEV ⇒ 403
+    `This token has no access to model <uuid>`（实测）。2.x（`mid` 本来就是名字）行为不变。
+  - 回退档端点过 `endpoint_of()`：旧实现把 `base_url` 原样当完整 URL POST（如 `…/v1`）⇒ 403/404；
+    现在每档都落到 `/v1/systemone`（幂等，手动填完整端点也兼容）。
+- **只配回退链也能用**：`jev_model` / `jev_decision_model` 单模型字段留空、只选了 `jev_models` /
+  `jev_decision_models` 时，链首自动当主档（其余作回退）；主档填了但解析失败也走同一兜底。
+- **适配 KiraAI 3.1.1 内置 TypeSafe 决策模型提供商**：新增 `jev_decision_model`（单选）与
+  `jev_decision_models`（多选，decision 分组）；与原有 OpenAI 兼容的 `jev_model` / `jev_models`
+  合并成同一条回退链（OpenAI 兼容 → TypeSafe → 回退链）。两组都留空 = 旧行为逐字节不变。
+- **旧版手动 JEV 连接字段已移除**：`jev_base_url` / `jev_api_key` / `jev_model_name` 不再出现在
+  任何界面（框架配置页 / 自定义面板 / `/config` 都不再下发）；加载时会**清空并停用**（旧值绝不隐形生效），
+  保存时从配置文件剔除。请改用「提供商（TypeSafe / OpenAI 兼容）+ JEV 模型链」。
+- **模型清单与前端按类型隔离**：`/models` 放行 `decision` / `rerank`；自定义面板按字段类型过滤
+  （LLM / 向量 / 重排 / 决策各进各的下拉，不互相污染）。
+- **修复 `rerank_models` 类型写错**：原 `model_type` 是 `llm`，但 `rerankx.py` 取的是 rerank 客户端
+  ⇒ 重排回退链实际不生效；改为 `rerank`。
+- 测试：新增 `tests/test_jev_model_chain.py`（uuid→name、端点规整、decision 组、链-only 主档、
+  `_post_sync` 回退档 URL）；`test_time_provenance` 的「300 天必然跨年」改为 400 天（跨年断言在
+  1–10 月会假失败）。
+- 版本 2.22.22 → 2.22.23
 
 ### v2.22.22 —— flat 规则与缓存命中修正 ✓
 

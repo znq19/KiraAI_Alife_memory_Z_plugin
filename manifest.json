@@ -1,7 +1,7 @@
 {
   "plugin_id": "alife_memory_z",
   "display_name": "Alife Memory Z",
-  "version": "2.22.22",
+  "version": "2.22.23",
   "core_version": ">=2.24.3",
   "author": "znq19",
   "repo": "https://github.com/znq19/KiraAI_Alife_memory_Z_plugin",

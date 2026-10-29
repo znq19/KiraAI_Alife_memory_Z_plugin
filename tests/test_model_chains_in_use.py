@@ -207,10 +207,11 @@ def test_legacy_single_model_is_migrated_into_first_link(tmp_path):
     before = {k: mc.chain_refs(p.settings, k, lk) for k, lk in (
         ("compress_models", "compress_model"), ("audit_models", "audit_model"),
         ("jev_models", "jev_model_name"), ("rerank_models", "rerank_model"))}
+    assert p.settings.jev_model_name == "", "旧手动 JEV 字段应在加载时被清空 ✗"
     run(p._migrate_chain_first_link())
     assert p.settings.compress_models == ["p:only"], "压缩的单模型没被升级为第 1 档 ✗"
     assert p.settings.audit_models == ["a:only"]
-    assert p.settings.jev_models == ["j:only"]
+    assert p.settings.jev_models == [], "JEV 旧手动模型名不是 provider ref，不得搬进链 ✗"
     assert p.settings.rerank_models == ["r:only"]
     after = {k: mc.chain_refs(p.settings, k, lk) for k, lk in (
         ("compress_models", "compress_model"), ("audit_models", "audit_model"),

@@ -205,9 +205,9 @@ def test_short_time_keeps_the_year_when_it_is_not_this_year():
     now = time.time()
     same_year = retrieval.short_time(now)
     assert len(same_year.split(" ")[0].split("-")) == 2, same_year  # MM-DD
-    older = retrieval.short_time(now - 300 * 86400)  # 任何日期往前 300 天必然跨年
+    older = retrieval.short_time(now - 400 * 86400)  # 任何日期往前 400 天必然跨年（300 天在 1–10 月不够）
     assert len(older.split(" ")[0].split("-")) == 3, older  # YYYY-MM-DD
-    assert retrieval.short_day(now - 300 * 86400).count("-") == 2
+    assert retrieval.short_day(now - 400 * 86400).count("-") == 2
 
 
 def test_compression_input_always_has_the_year():

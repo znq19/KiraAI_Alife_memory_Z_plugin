@@ -183,7 +183,8 @@ def test_single_model_becomes_first_link_and_is_written_back(tmp_path):
 
     assert p.settings.compress_models == ["workbuddy:gpt-4o"], "压缩链第 1 档没落位 ✗"
     assert p.settings.audit_models == ["workbuddy:deepseek-v4.1-flash"], "审计链第 1 档没落位 ✗"
-    assert p.settings.jev_models == ["workbuddy:gpt-4o-mini"], "JEV 链第 1 档没落位 ✗"
+    assert p.settings.jev_model_name == "", "旧手动 JEV 字段应被清空 ✗"
+    assert p.settings.jev_models == [], "旧手动 JEV 模型名不得搬进链 ✗"
     assert p.settings.rerank_models == ["workbuddy:rerank"], "重排链第 1 档没落位 ✗"
 
     saved = json.loads(cfg_file.read_text(encoding="utf-8")).get("alife", {})

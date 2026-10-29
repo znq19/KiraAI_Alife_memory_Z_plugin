@@ -272,29 +272,19 @@
       },
       "jev_model": {
         "type": "model_select",
-        "name": "JEV 决策模型（在提供商里注册好的）",
+        "name": "JEV 决策模型（OpenAI 兼容中转）",
         "default": "",
-        "description": "【重要】请正确选择类 JEV 决策模型，误选其他将无法正常使用。留空则 JEV 不生效，其它功能照常。",
+        "description": "旧方式：JEV 注册成 OpenAI 兼容提供商时选这里。3.1.1+ 用内置 TypeSafe 请选下一项。留空=该方式不启用。",
         "model_type": "llm",
-        "hint": "留空 = 不启用 JEV（其它功能照常）。请选择在「设置 → 提供商」注册好的类 JEV 决策模型。"
+        "hint": "留空 = 该方式不启用（回退链仍可单独使用）。OpenAI 兼容中转用这一项；3.1.1+ 内置 TypeSafe 请用下一项。"
       },
-      "jev_base_url": {
-        "type": "string",
-        "name": "JEV 接口地址（可留空）",
+      "jev_decision_model": {
+        "type": "model_select",
+        "name": "JEV 决策模型（TypeSafe · 3.1.1+）",
         "default": "",
-        "description": "只有需要覆盖时才填。留空会自动使用所选提供商的接口地址；官方默认为 https://api.typesafe.ai。"
-      },
-      "jev_api_key": {
-        "type": "string",
-        "name": "JEV API 密钥（可留空）",
-        "default": "",
-        "description": "留空自动使用所选提供商的密钥（推荐这么做）。也可填 $$环境变量名 从环境变量读取。"
-      },
-      "jev_model_name": {
-        "type": "string",
-        "name": "JEV 模型名（可留空）",
-        "default": "",
-        "description": "留空自动使用所选模型的模型名；官方默认为 jev-latest。"
+        "description": "3.1.1+ 内置 TypeSafe 决策模型：添加 TypeSafe 提供商与 jev-latest 决策模型后选这里。与上一项二选一。",
+        "model_type": "decision",
+        "hint": "留空 = 该方式不启用。与 OpenAI 兼容的「JEV 决策模型」二选一即可。"
       },
       "jev_timeout_ms": {
         "type": "integer",
@@ -986,14 +976,25 @@
       },
       "jev_models": {
         "type": "multi_select",
-        "name": "JEV 回退链（≤10，按序回退）",
+        "name": "JEV 回退链（OpenAI 兼容中转，≤10）",
         "default": [],
-        "description": "JEV 决策链路的有序回退链（最多 10 个）。按序尝试；全失败回落「JEV 决策模型」→宿主默认。留空=只用单模型字段。",
+        "description": "旧方式：OpenAI 兼容提供商的 JEV 回退链（≤10）。与 TypeSafe 链合并；留空=该组不使用。",
         "item_type": "string",
         "source": "model",
         "model_type": "llm",
         "max_items": 10,
-        "hint": "按顺序点击 = 回退优先级（最多 10 个）。某个模型失败会自动换下一个；全部失败才回落上面的单模型字段。面板里可上下调序。"
+        "hint": "按顺序点击 = 回退优先级（最多 10 个）。OpenAI 兼容中转用这一组；3.1.1+ 用内置 TypeSafe 时请用下面的决策链。"
+      },
+      "jev_decision_models": {
+        "type": "multi_select",
+        "name": "JEV 回退链（TypeSafe 决策模型，≤10）",
+        "default": [],
+        "description": "TypeSafe 决策模型回退链（≤10）。与 OpenAI 兼容链合并；只填这一条也能用（第 1 档当主档）。",
+        "item_type": "string",
+        "source": "model",
+        "model_type": "decision",
+        "max_items": 10,
+        "hint": "按顺序点击 = 回退优先级（最多 10 个）。只填这一条、其余 JEV 模型字段留空也能用（第 1 档自动当主档）。"
       },
       "rerank_models": {
         "type": "multi_select",
@@ -1002,7 +1003,7 @@
         "description": "重排链路的有序回退链（最多 10 个）。按序尝试；全失败回落「启用模型重排」字段→JEV/宿主默认。留空=只用单模型字段。",
         "item_type": "string",
         "source": "model",
-        "model_type": "llm",
+        "model_type": "rerank",
         "max_items": 10,
         "hint": "按顺序点击 = 回退优先级（最多 10 个）。某个模型失败会自动换下一个；全部失败才回落上面的单模型字段。面板里可上下调序。"
       }

@@ -23,6 +23,7 @@ from core.logging_manager import get_logger
 
 from .logfmt import provider_log_brief
 from .contracts import (
+    HIDDEN_SETTINGS,
     ConfigEdit,
     TrashPurge,
     TrashRestore,
@@ -573,6 +574,36 @@ def edit_skip_revision(edit):
     return payload, (forced or pure_delete)
 
 
+def _neutralize_legacy_jev(settings):
+    """旧版手动 JEV 字段已停用：加载时**清空**，确保旧配置绝不隐形生效。
+
+    字段仍保留在 Settings 里只为兼容旧配置文件（extra="forbid" 不能直接删字段）；
+    界面（schema.json / 自定义面板 / /config）都不再暴露它们，保存时也会剔除。
+    """
+    hit = []
+    for key in HIDDEN_SETTINGS:
+        try:
+            if str(getattr(settings, key, "") or "").strip():
+                hit.append(key)
+            setattr(settings, key, "")
+        except Exception:  # noqa: BLE001 —— 极端情况下也不得阻断加载
+            pass
+    if hit:
+        logger.warning(
+            "[记忆·Z] 旧版手动 JEV 配置（%s）已停用并被清空：该方式已移除，不再生效；"
+            "请在「设置 → 提供商」注册 TypeSafe 或 OpenAI 兼容提供商，再在 JEV 模型链里选择。",
+            " / ".join(hit),
+        )
+    return settings
+
+
+def _public_settings_dump(settings):
+    data = settings.model_dump()
+    for key in HIDDEN_SETTINGS:
+        data.pop(key, None)
+    return data
+
+
 def revision(settings):
     return hashlib.sha256(dump(settings.model_dump()).encode()).hexdigest()
 
@@ -581,7 +612,7 @@ class AlifeMemoryPlugin(BasePlugin):
     def __init__(self, ctx, cfg):
         super().__init__(ctx, cfg)
         # Old configuration is retained by the host. New fields live under one section.
-        self.settings = Settings.model_validate(cfg.get("alife", {}))
+        self.settings = _neutralize_legacy_jev(Settings.model_validate(cfg.get("alife", {})))
         self.config_lock = asyncio.Lock()
         self.store = None
         self.engine = None
@@ -627,6 +658,13 @@ class AlifeMemoryPlugin(BasePlugin):
             except Exception:
                 log_path = None
             self.decisions = Decisions(self.settings, mgr, log_path)
+            # 3.1.1+：JEV 有两类提供商标源（OpenAI 兼容 / TypeSafe 决策模型）⇒ 启动时
+            # 把实际来源写进日志，排查“选了模型却没生效”时不用猜。
+            _dm = str(getattr(self.settings, "jev_decision_model", "") or "").strip()
+            _dms = getattr(self.settings, "jev_decision_models", None) or []
+            if _dm or _dms:
+                logger.info("[记忆·Z] JEV 决策模型来源：TypeSafe（%s）",
+                            _dm or ("%d 档回退链" % len(_dms)))
             # ★ 2026-10-10：重排也支持有序回退链（单档保持字符串 ⇒ 与旧版一致）
             _rr = chain_refs(self.settings, "rerank_models", "rerank_model")
             _rmodel = _rr[0] if len(_rr) == 1 else (_rr or "")
@@ -646,7 +684,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 "[记忆·Z] 模型链路：压缩 %s ｜ 审计 %s ｜ JEV %s ｜ 重排 %s",
                 chain_desc(self.settings, "compress_models", "compress_model", label_of),
                 chain_desc(self.settings, "audit_models", "audit_model", label_of),
-                chain_desc(self.settings, "jev_models", "jev_model_name", label_of),
+                chain_desc(self.settings, "jev_models", "jev_model", label_of),
                 chain_desc(self.settings, "rerank_models", "rerank_model", label_of),
             )
             self._jev_notice = None          # 配置变了 ⇒ 允许重新提示
@@ -666,15 +704,15 @@ class AlifeMemoryPlugin(BasePlugin):
                 else:
                     # ★ 以前这里是**静默**的 ✗ ⇒ 用户开了配置却一行 JEV 日志都没有，无从排查
                     if not getattr(_c, "uuid", "") and not getattr(_c, "api_key", ""):
-                        _why = "未选择类 JEV 决策模型，且未填 JEV 接口密钥"
+                        _why = "未选择 JEV 决策模型"
                     elif not getattr(_c, "api_key", ""):
                         _why = "未解析到密钥（提供商不可用，或该模型没有配密钥）"
                     else:
                         _why = "接口地址为空"
                     logger.warning(
                         "[记忆·Z] JEV 已开启但**未就绪**（暂不生效）：%s。"
-                        "请在「设置 → 提供商」注册类 JEV 决策模型，并在插件设置里选中它"
-                        "（或在高级项里直接填 JEV 接口地址与密钥）", _why)
+                        "请在「设置 → 提供商」注册 TypeSafe（或 OpenAI 兼容）提供商，"
+                        "并在插件设置里选中 JEV 模型", _why)
         except Exception:
             logger.debug("[记忆·Z] JEV/重排初始化失败（按不可用处理）", exc_info=True)
             self.decisions = None
@@ -828,6 +866,14 @@ class AlifeMemoryPlugin(BasePlugin):
             logger.warning("[记忆·Z] 配置迁移：配置文件无法解析，已跳过")
             return []
         changed, updated = migrate_config(raw)
+        # 旧版手动 JEV 字段：一律从配置文件里剔除（值已在加载时清空/停用）
+        _legacy = [k for k in HIDDEN_SETTINGS if k in (updated.get("alife") or {})]
+        if _legacy:
+            _alife = dict(updated.get("alife") or {})
+            for _k in _legacy:
+                _alife.pop(_k, None)
+            updated["alife"] = _alife
+            changed = list(changed) + ["legacy_jev"]
         if updated == raw:
             return []
         # Persist the version marker even when no value changed, so a later
@@ -841,7 +887,7 @@ class AlifeMemoryPlugin(BasePlugin):
         await asyncio.to_thread(save)
         self.plugin_cfg = updated
         self.ctx.plugin_mgr.plugin_configs[PLUGIN_ID] = updated
-        self.settings = Settings.model_validate(updated.get("alife", {}))
+        self.settings = _neutralize_legacy_jev(Settings.model_validate(updated.get("alife", {})))
         logger.info("[记忆·Z] 配置已迁移到新默认值：%s", "、".join(changed))
         self._build_aux()
         return changed
@@ -2012,12 +2058,12 @@ class AlifeMemoryPlugin(BasePlugin):
     @staticmethod
     def _aux_fingerprint(settings):
         """JEV/重排相关配置指纹：变了就重建决策层（与在哪改的无关）。"""
-        keys = ("jev_enabled", "jev_model", "jev_base_url", "jev_api_key",
-                "jev_model_name", "jev_timeout_ms", "jev_sample", "jev_recall",
+        keys = ("jev_enabled", "jev_model", "jev_decision_model",
+                "jev_timeout_ms", "jev_sample", "jev_recall",
                 # ★ 2026-10-10：附加指令也要进指纹 ✗→✓
                 #   （否则用户改了提示词，已建好的 JEV 决策层不会重建 ⇒ 改了像没改 ✗）
                 "jev_prompt_append",
-                "jev_models",
+                "jev_models", "jev_decision_models",
                 "jev_merge", "jev_audit", "jev_importance",
                 "rerank_enabled", "rerank_model", "rerank_models", "rerank_timeout_ms")
         return tuple(str(getattr(settings, k, "")) for k in keys)
@@ -4972,15 +5018,19 @@ class AlifeMemoryPlugin(BasePlugin):
 
     @register.api(method="GET", path="/config", auth=True)
     async def api_config(self):
+        _schema = Settings.model_json_schema()
+        # 旧版 JEV 手动连接字段：仍参与校验（旧配置兼容），但值会在加载时清空、不再生效
+        for _k in HIDDEN_SETTINGS:
+            (_schema.get("properties") or {}).pop(_k, None)
         return {
             "revision": revision(self.settings),
-            "settings": self.settings.model_dump(),
-            "schema": Settings.model_json_schema(),
+            "settings": _public_settings_dump(self.settings),
+            "schema": _schema,
             # ★ 2026-10-12（用户实拍）：光给 schema 不够 ✗
             #   `*_models` 是 default_factory=list ⇒ **JSON Schema 里没有 default 字段** ✗
             #   ⇒ 前端「恢复默认」读到 undefined 就直接 return ✗（点了毫无反应 ✓ 用户报的就是这个）
             #   这里把**真实默认值全表**一起给前端 ✓ 用 Settings() 现造一份最准 ✓
-            "defaults": Settings().model_dump(),
+            "defaults": _public_settings_dump(Settings()),
             # ★ 2026-10-12：链长上限**只有一个来源**（mchains.CHAIN_MAX ✓）⇒ 前端别硬编码 ✗
             "chain_max": CHAIN_MAX,
             "labels": schema_labels(),
@@ -4995,7 +5045,9 @@ class AlifeMemoryPlugin(BasePlugin):
                 raise HTTPException(409, "configuration changed; reload first")
             path = get_config_path() / "plugins" / f"{PLUGIN_ID}.json"
             config = dict(self.plugin_cfg)
-            config["alife"] = edit.settings.model_dump()
+            # 旧隐藏字段即使被请求体回灌，也必须清空：绝不通过保存接口重新生效
+            edit.settings = _neutralize_legacy_jev(edit.settings)
+            config["alife"] = _public_settings_dump(edit.settings)
 
             def save():
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -5061,7 +5113,7 @@ class AlifeMemoryPlugin(BasePlugin):
         try:
             if str(self.store.get_state("cfg_migrate_self_fact", "") or "") == "1":
                 return
-            current = self.settings.model_dump()
+            current = _public_settings_dump(self.settings)
             changed = []
             if "self_fact_filter_enabled" not in current:
                 current["self_fact_filter_enabled"] = False
@@ -5107,12 +5159,11 @@ class AlifeMemoryPlugin(BasePlugin):
         try:
             if str(self.store.get_state("cfg_migrate_chain", "") or "") == "1":
                 return
-            current = self.settings.model_dump()
+            current = _public_settings_dump(self.settings)
             moved = []
             for chain_key, legacy_key, label in (
                 ("compress_models", "compress_model", "压缩"),
                 ("audit_models", "audit_model", "审计"),
-                ("jev_models", "jev_model_name", "JEV"),
                 ("rerank_models", "rerank_model", "重排"),
             ):
                 chain = current.get(chain_key) or []
@@ -5364,7 +5415,9 @@ class AlifeMemoryPlugin(BasePlugin):
                     _mid = getattr(info, "model_id", None)
                     _mt = getattr(info, "model_type", None)
                     _kk = getattr(_mt, "value", _mt) or "llm"
-                    if not _mid or _kk not in ("llm", "embedding"):
+                    # 3.1.1：decision（TypeSafe 决策模型）也要进清单（JEV 选择器用）；
+                    # rerank 同理（重排选择器用）。其它消费者按 kind 过滤，不受影响。
+                    if not _mid or _kk not in ("llm", "embedding", "decision", "rerank"):
                         continue
                     _mc = getattr(info, "model_config", None)
                     _mc = dict(_mc) if isinstance(_mc, dict) else {}
@@ -5390,7 +5443,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 if isinstance(gm, dict):
                     for kind, mmap in gm.items():
                         kk = getattr(kind, "value", kind)
-                        if kk not in ("llm", "embedding") or not isinstance(mmap, dict):
+                        if kk not in ("llm", "embedding", "decision", "rerank") or not isinstance(mmap, dict):
                             continue
                         for mid, entry in mmap.items():
                             _push(pid, kk, mid, entry, pname, "api", _type_of(pid))
@@ -5400,7 +5453,7 @@ class AlifeMemoryPlugin(BasePlugin):
             if isinstance(providers, dict):
                 mc = ((providers.get(pid) or {}).get("model_config") or {})
                 if isinstance(mc, dict):
-                    for kind in ("llm", "embedding"):
+                    for kind in ("llm", "embedding", "decision", "rerank"):
                         mmap = mc.get(kind) or {}
                         if not isinstance(mmap, dict):
                             continue

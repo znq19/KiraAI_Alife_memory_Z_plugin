@@ -207,8 +207,11 @@ def test_config_api_exposes_real_defaults(tmp_path):
     # 关键几个必须真的是"空链 = 跟随默认"
     for k in ("compress_models", "audit_models", "jev_models", "rerank_models"):
         assert defaults.get(k) == [], "%s 的默认应为空链（= 跟随 KiraAI 默认模型）✗ 实际 %r" % (k, defaults.get(k))
-    for k in ("compress_model", "audit_model", "jev_model_name", "rerank_model", "embedding_model"):
+    for k in ("compress_model", "audit_model", "rerank_model", "embedding_model"):
         assert defaults.get(k) == "", "%s 的默认应为空串 ✗ 实际 %r" % (k, defaults.get(k))
+    # 旧手动 JEV 字段已从全部前端隐藏（也不在 defaults 里）
+    for k in ("jev_base_url", "jev_api_key", "jev_model_name"):
+        assert k not in defaults, "%s 不应再暴露给前端 ✗" % k
 
 
 # ---------------------------------------------------------------- ① 同名模型
@@ -248,6 +251,58 @@ def test_same_display_name_models_are_marked_selectable(tmp_path):
     assert len(plain) == 1 and plain[0]["provider"] == "Trae", "不该被标记的条目被误标 ✗"
 
 
+def test_decision_and_rerank_models_are_exposed_with_kind(tmp_path):
+    """3.1.1：decision（TypeSafe）/ rerank 必须进 /models（各自带 kind），
+    前端才能把它们放进各自的下拉，而不是永远看不到。"""
+    p = build(tmp_path)
+    prov = {"pid-ts": {"name": "TypeSafe", "format": "TypeSafe", "model_config": {
+        "decision": {"uuid-d": {"model_name": "jev-latest", "config": {}}},
+        "rerank": {"uuid-r": {"model_name": "rerank-x", "config": {}}},
+        "llm": {"uuid-l": {"model_name": "chat", "config": {}}},
+    }}}
+    got = _fake_models_api(p, prov)
+    kinds = {(m["kind"], m["name"]) for m in got}
+    assert ("decision", "jev-latest") in kinds, kinds
+    assert ("rerank", "rerank-x") in kinds, kinds
+    assert ("llm", "chat") in kinds, kinds
+
+def test_legacy_manual_jev_fields_hidden_from_ui(tmp_path):
+    """3.1.1 起手动 JEV 连接字段不再出现在任何前端，但旧配置仍能读/仍生效。"""
+    p = build(tmp_path, jev_base_url="https://legacy", jev_api_key="sk-legacy",
+              jev_model_name="jev-latest")
+    cfg = run(p.api_config())
+    props = set(cfg["schema"]["properties"])
+    assert not ({"jev_base_url", "jev_api_key", "jev_model_name"} & props), props
+    assert p.settings.jev_api_key == "", "旧值必须在加载时清空（绝不隐形生效）✗"
+    assert p.settings.jev_model_name == "", "旧值必须在加载时清空 ✗"
+    assert p.settings.jev_base_url == ""
+
+def test_legacy_fields_cannot_be_reinjected_via_settings(tmp_path):
+    """旧隐藏字段即使出现在 Settings/保存请求里，也必须被清空且不写回配置。"""
+    hidden = getattr(m, "HIDDEN_SETTINGS", frozenset())
+    s = m.Settings(jev_api_key="sk-inject", jev_base_url="https://inject",
+                   jev_model_name="jev-latest")
+    s = m._neutralize_legacy_jev(s)
+    assert all(getattr(s, k) == "" for k in hidden)
+    dumped = m._public_settings_dump(s)
+    assert not (set(hidden) & set(dumped))
+
+def test_jev_model_fields_have_labels_and_defaults(tmp_path):
+    """JEV 四个模型字段必须同时出现在 schema / labels / defaults 里（前端才显示得全）。"""
+    p = build(tmp_path)
+    cfg = run(p.api_config())
+    for k in ("jev_model", "jev_models", "jev_decision_model", "jev_decision_models"):
+        assert k in cfg["schema"]["properties"], "缺少 schema 字段：%s" % k
+        assert k in cfg["labels"], "缺少中文标签：%s" % k
+        assert k in cfg["defaults"], "缺少默认值：%s" % k
+
+def test_aux_fingerprint_tracks_decision_fields(tmp_path):
+    """改 TypeSafe 决策模型必须触发决策层重建（否则改了像没改）。"""
+    p = build(tmp_path)
+    before = m.AlifeMemoryPlugin._aux_fingerprint(p.settings)
+    p.settings.jev_decision_model = "p:uuid-d"
+    assert m.AlifeMemoryPlugin._aux_fingerprint(p.settings) != before
+    
 # ---------------------------------------------------------------- ④ 其他一致性
 def test_chain_limit_has_single_source_of_truth(tmp_path):
     """★ 链长上限只能有一个来源（mchains.CHAIN_MAX）⇒ 前端不许硬编码 ✗

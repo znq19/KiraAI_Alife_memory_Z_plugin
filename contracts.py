@@ -53,6 +53,11 @@ def relation_issue(relation):
     return ""
 
 
+# 旧版 JEV 手动连接字段：3.1.1 起提供商已能直接注册 TypeSafe 决策模型 ⇒ 不再暴露给用户。
+# 保留字段是为了**旧配置仍能通过校验并继续生效**（extra="forbid" 不能直接删）。
+HIDDEN_SETTINGS = frozenset({"jev_base_url", "jev_api_key", "jev_model_name"})
+
+
 class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
 
@@ -306,6 +311,7 @@ class Settings(Strict):
     # ── v2.18.74：JEV 决策层（**可选增强**；默认全关 ⇒ 行为与之前逐字节一致）──
     jev_enabled: bool = False
     jev_model: str = ""                   # 在 KiraAI 里选一个类 JEV 决策模型
+    jev_decision_model: str = ""          # 3.1.1+ 内置 TypeSafe 决策模型（decision 分组）
     jev_base_url: str = ""                # 可留空（自动取所选提供商的 base_url）
     jev_api_key: str = ""                 # 可留空（自动取所选提供商的 key）；支持 $$ENV_NAME
     jev_model_name: str = ""              # 可留空（自动取所选模型的 model_id）
@@ -479,6 +485,7 @@ class Settings(Strict):
     compress_models: list[str] = Field(default_factory=list)   # 压缩/合并链路（有序 ✓ ≤10 ✓）
     audit_models: list[str] = Field(default_factory=list)      # 审计链路（有序 ✓ ≤10 ✓）
     jev_models: list[str] = Field(default_factory=list)        # JEV 决策链路（有序 ✓ ≤10 ✓）
+    jev_decision_models: list[str] = Field(default_factory=list)  # 决策模型回退链（3.1.1+ ✓）
     rerank_models: list[str] = Field(default_factory=list)     # 重排链路（有序 ✓ ≤10 ✓）
 
     @model_validator(mode="after")

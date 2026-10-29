@@ -7,7 +7,10 @@ from pathlib import Path
 
 # 字段级提示语（前端占位/说明）——不写的话宿主会显示通用占位（如「使用默认向量模型」）易误导 ✗
 _MODEL_HINTS = {
-    "jev_model": "留空 = 不启用 JEV（其它功能照常）。请选择在「设置 → 提供商」注册好的类 JEV 决策模型。",
+    "jev_model": "留空 = 该方式不启用（回退链仍可单独使用）。OpenAI 兼容中转用这一项；3.1.1+ 内置 TypeSafe 请用下一项。",
+    "jev_decision_model": "留空 = 该方式不启用。与 OpenAI 兼容的「JEV 决策模型」二选一即可。",
+    "jev_models": "按顺序点击 = 回退优先级（最多 10 个）。OpenAI 兼容中转用这一组；3.1.1+ 用内置 TypeSafe 时请用下面的决策链。",
+    "jev_decision_models": "按顺序点击 = 回退优先级（最多 10 个）。只填这一条、其余 JEV 模型字段留空也能用（第 1 档自动当主档）。",
     "rerank_model": "留空 = 不重排（使用内置排序）。请选择在提供商里注册好的 Rerank 模型。",
     "embedding_model": "留空 = 不启用向量检索。请选择在提供商里注册好的向量模型。",
 }
@@ -61,7 +64,8 @@ names = dict(
             "Bot可访问范围",
             "感知事实批量（×10）",
         "启用 JEV 决策层（可选，默认关闭）",
-        "JEV 决策模型（在提供商里注册好的）",
+        "JEV 决策模型（OpenAI 兼容中转）",
+        "JEV 决策模型（TypeSafe · 3.1.1+）",
         "JEV 接口地址（可留空）",
         "JEV API 密钥（可留空）",
         "JEV 模型名（可留空）",
@@ -159,14 +163,18 @@ names = dict(
             "跨会话跳过折叠原文",
             "压缩/合并回退链（≤10，按序回退）",
             "审计回退链（≤10，按序回退）",
-            "JEV 回退链（≤10，按序回退）",
+            "JEV 回退链（OpenAI 兼容中转，≤10）",
+            "JEV 回退链（TypeSafe 决策模型，≤10）",
             "重排回退链（≤10，按序回退）",
         ],
     )
 )
 _missing = [k for k in schema["properties"] if k not in names]
+_hidden = getattr(module, "HIDDEN_SETTINGS", frozenset())
 fields = {}
 for key, p in schema["properties"].items():
+    if key in _hidden:
+        continue
     kind = {
         "boolean": "switch",
         "number": "float",
@@ -194,7 +202,10 @@ for key, p in schema["properties"].items():
     if key.endswith("_models"):
         field["type"] = "multi_select"
         field["source"] = "model"
-        field["model_type"] = "llm"
+        field["model_type"] = {
+            "jev_decision_models": "decision",
+            "rerank_models": "rerank",
+        }.get(key, "llm")
         field["max_items"] = 10
         field["hint"] = "按顺序点击 = 回退优先级（最多 10 个）。某个模型失败会自动换下一个；全部失败才回落上面的单模型字段。面板里可上下调序。"
     if key.endswith("_model"):
@@ -202,6 +213,7 @@ for key, p in schema["properties"].items():
         field["model_type"] = {
             "embedding_model": "embedding",
             "rerank_model": "rerank",
+            "jev_decision_model": "decision",
         }.get(key, "llm")
     if key in _MODEL_HINTS:
         field["hint"] = _MODEL_HINTS[key]

@@ -243,7 +243,8 @@ def test_host_schema_matches_every_validated_setting():
 
     schema = json.loads((ROOT / "schema.json").read_text(encoding="utf-8"))
     fields = schema["alife"]["fields"]
-    assert set(fields) == set(module.Settings.model_fields)
+    hidden = getattr(module, "HIDDEN_SETTINGS", frozenset())
+    assert set(fields) == set(module.Settings.model_fields) - hidden
     assert set(module.HELP) == set(module.Settings.model_fields)
     for key, spec in fields.items():
         field = create_field_from_schema(key, spec)
@@ -524,6 +525,42 @@ async def test_real_core_capture_inject_edit_reload(tmp_path, monkeypatch):
     finally:
         await plugin2.terminate()
 
+
+@pytest.mark.asyncio
+async def test_config_save_cannot_reinject_hidden_jev(tmp_path, monkeypatch):
+    """保存接口即使收到旧隐藏字段，也必须清空、不写盘、不生效。"""
+    import json as _json
+
+    from fastapi import FastAPI
+    from httpx import AsyncClient, ASGITransport
+
+    monkeypatch.setattr(module, "get_config_path", lambda: tmp_path / "config")
+    ctx = types.SimpleNamespace(
+        get_plugin_data_dir=lambda: tmp_path,
+        plugin_mgr=types.SimpleNamespace(plugin_configs={}),
+    )
+    plugin = module.AlifeMemoryPlugin(
+        ctx, {"alife": {"probability": 0.0, "audit_enabled": False}}
+    )
+    await plugin.initialize()
+    app = FastAPI()
+    app.post("/config")(plugin.api_save_config)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            cfg = await plugin.api_config()
+            payload = dict(cfg["settings"])
+            payload.update({"jev_api_key": "sk-inject", "jev_base_url": "https://inject",
+                            "jev_model_name": "jev-latest"})
+            r = await client.post("/config", json={"revision": cfg["revision"], "settings": payload})
+            assert r.status_code == 200, r.text
+            assert plugin.settings.jev_api_key == ""
+            assert plugin.settings.jev_base_url == ""
+            assert plugin.settings.jev_model_name == ""
+            saved = _json.loads((tmp_path / "config/plugins/alife_memory_z.json").read_text("utf-8"))
+            assert not (set(module.HIDDEN_SETTINGS) & set(saved["alife"]))
+            assert plugin.decisions is None or not plugin.decisions.ready
+    finally:
+        await plugin.terminate()
 
 @pytest.mark.asyncio
 async def test_api_validation_conflict_and_atomic_config(tmp_path, monkeypatch):
@@ -1663,7 +1700,8 @@ async def test_fact_keyword_search_and_config_labels(tmp_path):
         labels = (await plugin.api_config())["labels"]
         assert labels["proactive_jitter"] == "主动感知随机偏移（秒）"
         assert labels["inject_mode"] == "注入形态"
-        assert set(labels) == set(module.Settings.model_fields)
+        assert set(labels) == (set(module.Settings.model_fields)
+                                - getattr(module, "HIDDEN_SETTINGS", frozenset()))
     finally:
         await plugin.terminate()
 
@@ -1977,7 +2015,8 @@ def test_every_setting_is_actually_used():
     暴露给用户的开关如果代码里根本没读，是最伤人的假象 ✓
     （同类病：`bot:1` 标了没人用 ✗ / `confidence` 字段只有建表语句 ✗）
     """
-    names = list(module.Settings.model_fields)
+    hidden = getattr(module, "HIDDEN_SETTINGS", frozenset())
+    names = [k for k in module.Settings.model_fields if k not in hidden]
     files = (
         "main.py", "storage.py", "engine.py", "retrieval.py",
         "identity.py", "migration.py", "output_validation.py",

@@ -51,13 +51,13 @@ function extract(name) {
   throw new Error("函数 " + name + " 大括号不平衡");
 }
 
-const want = ["esc", "modelLabel", "marqueeName", "markMarquees", "restoreKeysOf", "hostDefaultLabel", "plainModelSelect", "chainCombo", "chainLookup", "chainKeyOf", "chainRefsOf", "chainNameOf",
+const want = ["esc", "modelLabel", "kindsFor", "kindTag", "marqueeName", "markMarquees", "restoreKeysOf", "hostDefaultLabel", "plainModelSelect", "chainCombo", "chainLookup", "chainKeyOf", "chainRefsOf", "chainNameOf",
               "chainRowHtml", "chainListHtml"];
 const code = want.map(extract).join("\n");
 const sandbox = { Set, Map, Array, String, Object, JSON, console, config: { settings: {} },
   };
 require("vm").createContext(sandbox);
-require("vm").runInContext(code + "\n;globalThis.__fn={modelLabel,chainLookup,chainListHtml,chainRefsOf,marqueeName,markMarquees,restoreKeysOf,plainModelSelect,chainCombo};", sandbox);
+require("vm").runInContext(code + "\n;globalThis.__fn={modelLabel,chainLookup,chainListHtml,chainRefsOf,marqueeName,markMarquees,restoreKeysOf,hostDefaultLabel,plainModelSelect,chainCombo};", sandbox);
 const F = sandbox.__fn;
 
 const dup = [
@@ -103,8 +103,30 @@ const markup = {
   select_legacyKey: selHtml.includes('data-key="compress_model"'),
   select_stringKind: selHtml.includes('data-kind="string"'),
 };
+// ★ 3.1.1：decision（TypeSafe）/ rerank 必须各进各的下拉，不能混进普通 LLM
+const mixed = [
+  { id: "p:l1", name: "chat", provider: "P", kind: "llm", legacy: [] },
+  { id: "p:d1", name: "jev-latest", provider: "TS", kind: "decision", legacy: [] },
+  { id: "p:r1", name: "rerank-x", provider: "P", kind: "rerank", legacy: [] },
+  { id: "p:e1", name: "emb", provider: "P", kind: "embedding", legacy: [] },
+];
+const cnt = (kinds) => (F.chainListHtml([], mixed, kinds, F.chainLookup(mixed)).match(/data-ref=/g) || []).length;
+const kind_counts = {
+  llm: cnt(["llm"]), decision: cnt(["decision"]), rerank: cnt(["rerank"]), embedding: cnt(["embedding"]),
+  sel_decision_has_d: F.plainModelSelect("jev_decision_model", "", mixed).includes('value="p:d1"'),
+  sel_decision_has_l: F.plainModelSelect("jev_decision_model", "", mixed).includes('value="p:l1"'),
+  sel_llm_has_d: F.plainModelSelect("jev_model", "", mixed).includes('value="p:d1"'),
+  sel_rerank_has_r: F.plainModelSelect("rerank_model", "", mixed).includes('value="p:r1"'),
+  sel_rerank_has_l: F.plainModelSelect("rerank_model", "", mixed).includes('value="p:l1"'),
+};
+const empty_labels = {
+  jev: F.hostDefaultLabel("jev_model"),
+  jev_dec: F.hostDefaultLabel("jev_decision_model"),
+  rerank: F.hostDefaultLabel("rerank_model"),
+  compress: F.hostDefaultLabel("compress_model"),
+};
 console.log(JSON.stringify({
-  restore_pairs, both_cleared_chain, markup,
+  restore_pairs, both_cleared_chain, markup, kind_counts, empty_labels,
   labels, unique: uniq.size, rows,
   legacy_fallback: F.chainRefsOf("compress_model", "workbuddy:gpt-4o").length,
   // ★ 恢复默认后的状态：值清空 ⇒ 链必须为空（= 跟随宿主默认 ✓ 不是"零档" ✗）
@@ -130,6 +152,24 @@ def _run_driver():
         assert out.returncode == 0, "node 跑失败：%s" % (out.stderr[-800:] or out.stdout[-800:])
         return json.loads(out.stdout.strip().splitlines()[-1])
 
+
+def test_model_field_kinds_are_isolated():
+    """decision / rerank / llm / embedding 各自只看自己的类型（3.1.1 修复）。"""
+    data = _run_driver()
+    k = data["kind_counts"]
+    assert k == {
+        "llm": 1, "decision": 1, "rerank": 1, "embedding": 1,
+        "sel_decision_has_d": True, "sel_decision_has_l": False,
+        "sel_llm_has_d": False,
+        "sel_rerank_has_r": True, "sel_rerank_has_l": False,
+    }, k
+
+def test_empty_model_labels_are_honest():
+    """JEV/重排空值不能显示成「使用默认主模型」（会误导用户）。"""
+    d = _run_driver()["empty_labels"]
+    assert "未选择" in d["jev"] and "未选择" in d["jev_dec"], d
+    assert "不启用重排" in d["rerank"], d
+    assert "使用 KiraAI 默认快速模型" == d["compress"], d
 
 def test_same_name_models_render_distinguishable_labels():
     """★ 同名/同名不同型提供商的模型，标签必须各不相同（否则用户分不清、易删错 ✗）"""

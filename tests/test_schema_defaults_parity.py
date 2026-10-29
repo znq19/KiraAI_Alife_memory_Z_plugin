@@ -51,6 +51,7 @@ def test_every_settings_field_is_exposed_with_a_label():
     """代码里每个配置项都要在配置页出现（否则用户改不了 ✓）—— 允许显式豁免 ✓"""
     fields = json.loads(
         (ROOT / "schema.json").read_text(encoding="utf-8"))["alife"]["fields"]
+    hidden = getattr(contracts, "HIDDEN_SETTINGS", frozenset())
     missing = [n for n in contracts.Settings.model_fields
-               if n not in fields and n not in SCHEMA_ONLY]
+               if n not in fields and n not in SCHEMA_ONLY and n not in hidden]
     assert not missing, "schema.json 缺少这些配置项 ✗：%s" % missing

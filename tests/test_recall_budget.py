@@ -230,10 +230,15 @@ async def test_jev_on_never_injects_more_facts_than_off(tmp_path):
                                     recall_budget_mode="strict"))
     await p_on.initialize()
     await _settle(p_on)
+    # 旧版手动 JEV 字段在加载时会被清空（2.22.23 起停用）⇒ 本用例要覆盖 JEV 路径，
+    # 在内存里显式注入（不经过用户配置面）
+    p_on.settings.jev_base_url = "http://127.0.0.1:9"
+    p_on.settings.jev_api_key = "stub"
+    p_on.settings.jev_model_name = "jev-latest"
     _seed(p_on.store, "qq:gm:seed", seeds)
     # ★ 先把决策层建好，再装桩 ✗ 否则 on_request 里的 _ensure_aux() 会重建，
     #   把桩冲掉 ⇒ 测试变成"假绿"（实测踩到：切 loose 也不红 ✓ 说明 JEV 根本没生效）
-    p_on._ensure_aux()
+    p_on._build_aux()   # 旧隐藏字段已不进配置指纹 ⇒ 测试内部直接重建决策层
     d = p_on.decisions
     assert d is not None
     used = {"n": 0}

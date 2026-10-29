@@ -1608,12 +1608,26 @@ function applyBatchMode() {
 //   为什么不用原生多选：① 下拉点完会挤成"一长条"✗ ② 原生多选**不能调序** ✗
 //   而回退链的**顺序就是语义**（先试谁、失败换谁）⇒ 必须能上下调序 ✓
 //   值格式沿用仓库约定：`data-kind="array"` + 换行分隔 ✓（readConfig 会 split("\n") ✓）
+// 每个模型字段只列它该有的类型：3.1.1 的 decision（TypeSafe 决策模型）与 rerank
+// 不能混进普通 LLM 下拉（旧实现所有非 embedding 字段都硬编码为 llm）。
+function kindsFor(modelKey) {
+  if (modelKey === "embedding_model") return ["embedding"];
+  if (modelKey === "rerank_model") return ["rerank"];
+  if (modelKey === "jev_decision_model") return ["decision"];
+  return ["llm"];
+}
+function kindTag(kind) {
+  return kind === "embedding" ? " · 向量"
+    : kind === "rerank" ? " · 重排"
+    : kind === "decision" ? " · 决策" : "";
+}
+
 function modelLabel(m) {
   // ★ 2026-10-12（用户实拍）：显示名会"撞车" —— 同名模型、或同名但类型不同的提供商
   //   ⇒ 面板里两个芯片长得一模一样 ⇒ 分不清、容易删错
   //   后端 /models 给重名条目打了 dup + tag（短标识）⇒ 这里补上，前端才分得清
   let s = (m.name || m.model || m.id) + (m.provider ? " · " + m.provider : "");
-  if (m.kind === "embedding") s += " · 向量";
+  s += kindTag(m.kind);
   if (m.dup && m.tag) s += " · " + m.tag;
   return s;
 }
@@ -1705,13 +1719,15 @@ function chainRowHtml(ref, idx, lookup) {
     '<span class="chain-x" title="从回退链移除">✕</span></button>'
   );
 }
-function chainListHtml(refs, models, isEmb, lookup) {
+function chainListHtml(refs, models, kinds, lookup) {
+  // 兼容旧的布尔调用（true=embedding / false=llm）；新代码一律传 kinds 数组
+  const want = Array.isArray(kinds) ? kinds : (kinds ? ["embedding"] : ["llm"]);
   const known = new Set(models.map((m) => m.id));
   const orphan = refs
     .map((r, i) => (known.has(r) ? "" : chainRowHtml(r, i, lookup)))
     .join("");
   const rows = models
-    .filter((m) => m.kind === (isEmb ? "embedding" : "llm"))
+    .filter((m) => want.includes(m.kind))
     .slice()
     .sort((a, b) => String(a.provider || "").localeCompare(String(b.provider || ""), "zh"))
     .map((m) => {
@@ -1733,6 +1749,9 @@ function chainListHtml(refs, models, isEmb, lookup) {
 function hostDefaultLabel(modelKey) {
   // ★ 2026-10-15：与其它字段**统一**的写法 ✓
   //   原来链栏是「使用 KiraAI 默认模型（未指定）」✗ —— 括号多余且让人误以为"没默认" ✓
+  // ★ 2.22.23：JEV / 重排的空值**不是**"跟随宿主默认"，不能显示成"默认主模型" ✗
+  if (modelKey && String(modelKey).indexOf("jev_") === 0) return "未选择（该组不使用）";
+  if (modelKey === "rerank_model") return "不启用重排（使用内置排序）";
   const tip = modelKey === "embedding_model" ? "向量"
     : (modelKey === "compress_model" ? "快速" : "主");
   return "使用 KiraAI 默认" + tip + "模型";
@@ -1740,6 +1759,7 @@ function hostDefaultLabel(modelKey) {
 
 function plainModelSelect(modelKey, value, models) {
   const isEmb = modelKey === "embedding_model";
+  const kinds = kindsFor(modelKey);
   const tip = modelKey === "compress_model" ? "快速" : modelKey === "audit_model" ? "主" : "向量";
   return (
       // ★ 2026-10-14 用户实拍：这个**隐藏 select** 本来就要负责提交旧字段（*_model）✗
@@ -1748,7 +1768,7 @@ function plainModelSelect(modelKey, value, models) {
       '<select class="' + (isEmb ? "" : "chain-hidden") + '" data-key="' + modelKey + '" data-kind="string">' +
     '<option value="">' + hostDefaultLabel(modelKey) + "</option>" +
     models
-      .filter((m) => m.kind === (isEmb ? "embedding" : "llm"))
+      .filter((m) => kinds.includes(m.kind))
       .slice()
       .sort((a, b) => String(a.provider || "").localeCompare(String(b.provider || ""), "zh"))
       .map((m) => {
@@ -1758,7 +1778,7 @@ function plainModelSelect(modelKey, value, models) {
           (value === m.id || legacy.includes(value) ? "selected" : "") + ">" +
           esc((m.name || m.model || m.id) + " · " +
               (m.provider || String(m.id).split(":")[0] || "") +
-              (m.kind === "embedding" ? " · 向量" : "")) +
+              kindTag(m.kind)) +
           "</option>"
         );
       })
@@ -1771,7 +1791,7 @@ function plainModelSelect(modelKey, value, models) {
 }
 function chainCombo(modelKey, value, models) {
   const chainKey = chainKeyOf(modelKey);
-  const isEmb = modelKey === "embedding_model";
+  const kinds = kindsFor(modelKey);
   const lookup = chainLookup(models);
   const refs = chainRefsOf(modelKey, value);
   return (
@@ -1786,7 +1806,7 @@ function chainCombo(modelKey, value, models) {
     '</span><span class="chain-caret">▾</span></button>' +
     '<div class="chain-menu hide">' +
     '<input type="search" class="chain-search" placeholder="搜索模型名 / 提供商…">' +
-    '<div class="chain-list">' + chainListHtml(refs, models, isEmb, lookup) + "</div>" +
+    '<div class="chain-list">' + chainListHtml(refs, models, kinds, lookup) + "</div>" +
     '<div class="chain-hint">点一下加入回退链 · ✕ 移除 · ↑↓ 调序 · 最多 10 档</div>' +
     "</div></div>"
   );
@@ -1807,8 +1827,8 @@ async function refreshModels() {
       const lst = c.querySelector(".chain-list");
       if (!h || !lst) return;
       const refs = (h.value || "").split("\n").map((s) => s.trim()).filter(Boolean);
-      const isEmb = c.dataset.modelKey === "embedding_model";
-      lst.innerHTML = chainListHtml(refs, models, isEmb, chainLookup(models));
+      const kinds = kindsFor(c.dataset.modelKey);
+      lst.innerHTML = chainListHtml(refs, models, kinds, chainLookup(models));
       markMarquees(c);                    // 新名字可能也长 ⇒ 重新判定滚动 ✓
     });
   } catch (e) { /* 网络抖动不影响已渲染的列表 ✓ */ }
@@ -1817,7 +1837,7 @@ async function refreshModels() {
 function bindChainCombos() {
   $$("#configForm .chain-combo").forEach((combo) => {
     const modelKey = combo.dataset.modelKey;
-    const isEmb = modelKey === "embedding_model";
+    const kinds = kindsFor(modelKey);
     const lookup = chainLookup(models);
     const hidden = combo.querySelector('input[type="hidden"]');
     const sel = combo.querySelector("select");
@@ -1843,7 +1863,7 @@ function bindChainCombos() {
       boxTx.innerHTML =
         marqueeName(refs.length ? chainNameOf(refs[0], lookup) : hostDefaultLabel(modelKey));
       cntEl.textContent = refs.length ? refs.length + " 档" : "";
-      list.innerHTML = chainListHtml(refs, models, isEmb, lookup);
+      list.innerHTML = chainListHtml(refs, models, kinds, lookup);
       markMarquees(combo);        // ★ 名字长到放不下 ⇒ 打标 is-wide（CSS 才会滚 ✓）
       hidden.dispatchEvent(new Event("input", { bubbles: true }));
     };
