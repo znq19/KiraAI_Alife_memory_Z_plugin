@@ -14,8 +14,8 @@ mod = importlib.import_module("alife_cfgv8.config_migrate")
 contracts = importlib.import_module("alife_cfgv8.contracts")
 
 
-def test_current_version_is_eight():
-    assert mod.CURRENT_VERSION == 8
+def test_current_version_is_at_least_eight():
+    assert mod.CURRENT_VERSION >= 8
 
 
 def test_new_default_prompt_has_drop_checklist():

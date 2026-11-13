@@ -516,16 +516,16 @@
       "permanent_cap": {
         "type": "integer",
         "name": "永久记忆条数上限",
-        "default": 10,
-        "description": "常驻永久记忆的条数上限，超过即触发整理；条数触发时会一次排空积压。",
+        "default": 30,
+        "description": "常驻永久记忆的条数上限（默认 30），超过即触发整理；条数触发时会优先处理积压。",
         "minimum": 1,
         "maximum": 200
       },
       "permanent_budget_chars": {
         "type": "integer",
         "name": "永久记忆字符预算",
-        "default": 3000,
-        "description": "常驻永久记忆的字符预算，超过即触发整理（按字符更贴近 token 成本）。",
+        "default": 5000,
+        "description": "常驻永久记忆的字符预算（默认 5000），超过即触发整理（按字符更贴近 token 成本）。",
         "minimum": 200,
         "maximum": 100000
       },
@@ -541,9 +541,31 @@
         "type": "integer",
         "name": "同一条整理间隔（天）",
         "default": 14,
-        "description": "同一条永久记忆多久内不重复整理（天）。",
+        "description": "同一条永久记忆多久内不重复整理（天）；超条数/超字符预算时自动绕过此冷却。",
         "minimum": 0,
         "maximum": 3650
+      },
+      "permanent_overcap_extract_lowest": {
+        "type": "switch",
+        "name": "超限自动提取最低条",
+        "default": true,
+        "description": "永久记忆超限且整理没有降低时，自动把保留度最低的一条强制提炼成事实或归档，直到回到预算内。默认开启。"
+      },
+      "permanent_overcap_extract_max": {
+        "type": "integer",
+        "name": "单次自动提取上限",
+        "default": 10,
+        "description": "单次自动维护最多连续强制提取几条（默认 10）；有进展时下次触发会继续，不是永久停止。",
+        "minimum": 1,
+        "maximum": 100
+      },
+      "permanent_tidy_retry_minutes": {
+        "type": "integer",
+        "name": "维护失败重试间隔（分钟）",
+        "default": 10,
+        "description": "自动整理无进展时的重试间隔（分钟，默认 10）；只延迟下一次自动触发，新写入/手动整理会立即重试。",
+        "minimum": 1,
+        "maximum": 1440
       },
       "tidy_rebuild_bot_enabled": {
         "type": "switch",

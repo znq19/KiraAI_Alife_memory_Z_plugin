@@ -3755,23 +3755,33 @@ class Store:
             return {"fact": self.row(full) if full else {"id": best_id}, "score": round(score, 3)}
         return None
 
-    def tidy_candidates(self, sid, days=14, limit=50, ids=None):
+    def tidy_candidates(self, sid, days=14, limit=50, ids=None, all_sessions=False):
         """按「保留度」从低到高挑永久记忆整理候选（零模型）。
 
         保留度 = 重要度 0.35 + 访问衰减 0.25 + 创建衰减 0.1 + 访问加成 ≤0.3，
         再给 rule 类一个保底加成——它不是不能被整理，只是不会被优先挑中。
+        ``all_sessions`` 用于全局范围下选**全局最低**，避免各会话各自挑本地最低。
         """
         now = time.time()
         cutoff = now - max(0, int(days)) * 86400
         with self.connect() as db:
-            rows = [
-                self.row(r)
-                for r in db.execute(
-                    "SELECT * FROM records WHERE sid=? AND permanent=1 AND deleted=0"
-                    " AND active=1 AND cold=0",
-                    (sid,),
-                )
-            ]
+            if all_sessions:
+                rows = [
+                    self.row(r)
+                    for r in db.execute(
+                        "SELECT * FROM records WHERE permanent=1 AND deleted=0"
+                        " AND active=1 AND cold=0"
+                    )
+                ]
+            else:
+                rows = [
+                    self.row(r)
+                    for r in db.execute(
+                        "SELECT * FROM records WHERE sid=? AND permanent=1 AND deleted=0"
+                        " AND active=1 AND cold=0",
+                        (sid,),
+                    )
+                ]
         if ids:
             # v2.18.19：只整理**指定的这几条** ✓（前端"重新提取事实"按钮 / bot 指定 ✓）
             keep = {str(i) for i in ids if i}

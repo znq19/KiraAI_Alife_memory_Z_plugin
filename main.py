@@ -4439,6 +4439,27 @@ class AlifeMemoryPlugin(BasePlugin):
             "additionalProperties": False,
         },
     )
+    async def permanent_pressure(self, sid, cfg=None):
+        """与注入侧同一口径：当前永久记忆条数/字符是否超预算。"""
+        cfg = cfg or self.runtime_settings()
+        live = await self.store.call("permanent_records", sid)
+        scope = live
+        if cfg.recall_scope == "global":
+            scope = await self.store.call(
+                "permanent_records", "", all_sessions=True
+            )
+        chars = sum(len(row.get("summary") or "") for row in scope)
+        count = len(scope)
+        over_count = count > int(cfg.permanent_cap or 0)
+        over_chars = chars > int(cfg.permanent_budget_chars or 0)
+        return {
+            "count": count,
+            "chars": chars,
+            "over_count": over_count,
+            "over_chars": over_chars,
+            "over": over_count or over_chars,
+        }
+
     async def memorize(self, event, content: str, category="", importance=None):
         cfg = self.runtime_settings()
         if not cfg.enabled:
@@ -4507,12 +4528,48 @@ class AlifeMemoryPlugin(BasePlugin):
         #   为何不再并发：三者同时跑会重复提取 ✗，甚至 dedupe 抢先把记录合并走
         #   ⇒ 归类时"来源已变" ⇒ **提取不到** ✗（用户实测担心 ✓）
         if self.settings.permanent_tidy_on_write:
-            await self.engine.enqueue("tidy", value.sid, automatic=False)
+            await self.engine.enqueue(
+                "tidy", value.sid, automatic=False,
+                detail=dump({"protect_id": record_id}),
+            )
         elif self.settings.permanent_dedupe:
             await self.engine.enqueue("dedupe", value.sid, automatic=True)
-        return self.recall_result(
-            event, {"ok": True, "id": await self.store.call("short_id", record_id)}
-        )
+        result = {"ok": True, "id": await self.store.call("short_id", record_id)}
+        pressure = await self.permanent_pressure(value.sid)
+        if pressure["over"]:
+            over = []
+            if pressure["over_count"]:
+                over.append("count")
+            if pressure["over_chars"]:
+                over.append("chars")
+            result["permanent"] = {
+                "count": pressure["count"],
+                "limit": int(self.settings.permanent_cap),
+                "chars": pressure["chars"],
+                "char_limit": int(self.settings.permanent_budget_chars),
+                "over": over,
+            }
+            if not self.settings.permanent_tidy_enabled:
+                tail = "自动整理已关闭；可手动整理或提高上限。"
+            elif getattr(self.settings, "permanent_overcap_extract_lowest", True):
+                tail = "已安排自动整理，若仍超限会自动把最低价值的一条提炼成事实并移出常驻。"
+            else:
+                tail = "可手动整理或指定归档。"
+            over_parts = []
+            if pressure["over_count"]:
+                over_parts.append(
+                    "条数上限（%d/%d）"
+                    % (pressure["count"], int(self.settings.permanent_cap))
+                )
+            if pressure["over_chars"]:
+                over_parts.append(
+                    "字符预算（%d/%d）"
+                    % (pressure["chars"], int(self.settings.permanent_budget_chars))
+                )
+            result["hint"] = "永久记忆已超过%s。%s" % (
+                "、".join(over_parts), tail
+            )
+        return self.recall_result(event, result)
 
     async def forget(self, event, id: str):
         try:
@@ -5786,7 +5843,10 @@ class AlifeMemoryPlugin(BasePlugin):
         #   为何不再并发：三者同时跑会重复提取 ✗，甚至 dedupe 抢先把记录合并走
         #   ⇒ 归类时"来源已变" ⇒ **提取不到** ✗（用户实测担心 ✓）
         if self.settings.permanent_tidy_on_write:
-            await self.engine.enqueue("tidy", value.sid, automatic=False)
+            await self.engine.enqueue(
+                "tidy", value.sid, automatic=False,
+                detail=dump({"protect_id": record_id}),
+            )
         elif self.settings.permanent_dedupe:
             await self.engine.enqueue("dedupe", value.sid, automatic=True)
         return {"id": record_id}

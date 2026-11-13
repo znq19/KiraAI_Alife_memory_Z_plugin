@@ -1,5 +1,13 @@
 # 验证记录
 
+## 2.22.24（2026-10-20）
+
+- 永久记忆超限：绕过 14 天冷却；无进展自动提取最低保留度条目；刚写入第一轮保护；单次安全上限 10。
+- `rebuild` 代码级强制移出（keep/split 兜底 extract/archive）。
+- 默认 `permanent_cap=30`、`permanent_budget_chars=5000`，配置迁移 v9。
+- KiraAI **3.2.0-beta.1**：`1108 passed + 16 subtests`，0 failed。
+- KiraAI **3.1.2**：`1108 passed + 16 subtests`，0 failed。
+
 ## 2.22.22（2026-10-19）
 
 - flat 视图规则块与真实 `- <主体>｜<内容>` 渲染对齐；grouped 规则块逐字不变，缓存命中不受影响。

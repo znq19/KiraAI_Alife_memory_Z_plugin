@@ -7,7 +7,7 @@ defaults (including prompt wording) without overriding personal choices.
 
 from .contracts import FACT_MERGE_PROMPT, RECORD_MERGE_PROMPT
 
-CURRENT_VERSION = 8
+CURRENT_VERSION = 9
 
 # v2.18.9 之前的 fact_merge_prompt 默认文案 ✓
 # 只用来把"从没改过措辞"的存量配置升到新文案 ✓ 用户自己改过的一律不碰 ✓
@@ -66,6 +66,12 @@ MIGRATIONS = {
         #   目标：**不开 JEV 时，合并模型自己也能判 drop**（纯冗余直接进回收站 ✓）
         #   存量配置里若还是上一版默认文案 ⇒ 升级 ✓；用户自己改过措辞 ⇒ 一个字不动 ✓
         ("fact_merge_prompt", _V7_FACT_MERGE_PROMPT, FACT_MERGE_PROMPT),
+    ],
+    9: [
+        # 2026-10-20（用户拍板）：默认永久记忆上限从 10 提到 30、字符预算
+        # 从 3000 提到 5000。只改仍是旧默认值的配置；用户自定义值不动。
+        ("permanent_cap", 10, 30),
+        ("permanent_budget_chars", 3000, 5000),
     ],
 
 }
