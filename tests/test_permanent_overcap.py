@@ -37,6 +37,26 @@ async def _seed(store, texts, importance=5):
     return ids
 
 
+def test_memorize_tool_decorator_is_on_memorize():
+    """静态守卫：@register.tool(name="Memorize") 不能因为插入辅助方法而错绑。"""
+    import ast
+    tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if not isinstance(dec, ast.Call) or not isinstance(dec.func, ast.Attribute):
+                continue
+            if dec.func.attr != "tool":
+                continue
+            for kw in dec.keywords:
+                if kw.arg == "name" and isinstance(kw.value, ast.Constant) \
+                        and kw.value.value == "Memorize":
+                    found.append(node.name)
+    assert found == ["memorize"], "Memorize 装饰器绑错函数：%r" % found
+
+
 @pytest.mark.asyncio
 async def test_overcap_bypasses_tidy_cooldown(tmp_path):
     plugin, store = await build_plugin(tmp_path)

@@ -4419,26 +4419,6 @@ class AlifeMemoryPlugin(BasePlugin):
         except ValueError:
             return self.recall_result(event, {"ok": False, "error": "invalid_search"})
 
-    @register.tool(
-        name="Memorize",
-        description=(
-            "保存值得长期记住的核心记忆（约束/身份/长期偏好）。事实类信息请交给事实库，"
-            "这里只放「必须每轮在场」的事；重复保存会返回已有条目。"
-        ),
-        params={
-            "type": "object",
-            "properties": {
-                "content": {"type": "string", "minLength": 1, "maxLength": 16000},
-                "category": {
-                    "type": "string",
-                    "description": "rule=铁律/身份约束，其余同事实类别；留空表示未分类",
-                },
-                "importance": {"type": "integer", "minimum": 1, "maximum": 10},
-            },
-            "required": ["content"],
-            "additionalProperties": False,
-        },
-    )
     async def permanent_pressure(self, sid, cfg=None):
         """与注入侧同一口径：当前永久记忆条数/字符是否超预算。"""
         cfg = cfg or self.runtime_settings()
@@ -4460,6 +4440,26 @@ class AlifeMemoryPlugin(BasePlugin):
             "over": over_count or over_chars,
         }
 
+    @register.tool(
+        name="Memorize",
+        description=(
+            "保存值得长期记住的核心记忆（约束/身份/长期偏好）。事实类信息请交给事实库，"
+            "这里只放「必须每轮在场」的事；重复保存会返回已有条目。"
+        ),
+        params={
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "minLength": 1, "maxLength": 16000},
+                "category": {
+                    "type": "string",
+                    "description": "rule=铁律/身份约束，其余同事实类别；留空表示未分类",
+                },
+                "importance": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            "required": ["content"],
+            "additionalProperties": False,
+        },
+    )
     async def memorize(self, event, content: str, category="", importance=None):
         cfg = self.runtime_settings()
         if not cfg.enabled:
