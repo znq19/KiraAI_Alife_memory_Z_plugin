@@ -4552,7 +4552,15 @@ class AlifeMemoryPlugin(BasePlugin):
             if not self.settings.permanent_tidy_enabled:
                 tail = "自动整理已关闭；可手动整理或提高上限。"
             elif getattr(self.settings, "permanent_overcap_extract_lowest", True):
-                tail = "已安排自动整理，若仍超限会自动把最低价值的一条提炼成事实并移出常驻。"
+                prefix = (
+                    "已安排自动整理"
+                    if self.settings.permanent_tidy_on_write
+                    else "将自动整理"
+                )
+                tail = (
+                    prefix
+                    + "，若仍超限会自动把最低价值的一条提炼成事实并移出常驻。"
+                )
             else:
                 tail = "可手动整理或指定归档。"
             over_parts = []
