@@ -898,6 +898,9 @@ class Engine:
         # v2.18.19：永久记忆**强制整理**的每会话防抖（10 秒）✓
         # 与 14 天的 tidy 冷却无关 ✗ —— 那个只管后台自动 ✓ 这里防手抖连点 ✓
         self._tidy_forced_at = {}
+        # 自动永久记忆维护（tidy/dedupe）无进展时的短暂重试冷却。
+        # 只延迟下一次自动触发；手动 tidy/新写入会清掉它并立即重试。
+        self._maint_retry = {}
         self.store, self.settings = store, settings
         self.model_call, self.embed, self.notice = model_call, embed, notice
         self.tasks = []
@@ -990,6 +993,13 @@ class Engine:
         self.tasks.clear()
 
     async def enqueue(self, kind, sid, automatic=False, detail=""):
+        if automatic and kind in ("tidy", "dedupe"):
+            until = self._maint_retry.get((kind, sid), 0)
+            if until and time.time() < until:
+                return None
+        elif not automatic and kind in ("tidy", "dedupe"):
+            # 新写入/手动整理：清掉旧冷却，允许立刻再试。
+            self._maint_retry.pop((kind, sid), None)
         if automatic and not await self.store.call("can_schedule", kind, sid):
             return None
         # v2.18.19：`detail` 透传给 worker ✓（例如整理永久记忆的"强制/指定条"✓）
@@ -2520,7 +2530,36 @@ class Engine:
         """
         self.last_tidy_notes[sid] = text
 
-    async def tidy_permanents(self, sid, job_id=None, force=False, ids=None, rebuild=False):
+    def _hold_maintenance(self, kind, sid, cfg):
+        """异常无进展时只做短暂重试冷却，不是永久停用。"""
+        minutes = max(1, int(getattr(cfg, "permanent_tidy_retry_minutes", 10) or 10))
+        self._maint_retry[(kind, sid)] = time.time() + minutes * 60
+
+    async def permanent_pressure(self, sid, cfg=None):
+        """当前永久记忆是否超过条数/字符预算（与注入侧同一口径）。"""
+        cfg = cfg or self.settings()
+        live = await self.store.call("permanent_records", sid)
+        scope = live
+        if cfg.recall_scope == "global":
+            scope = await self.store.call(
+                "permanent_records", "", all_sessions=True
+            )
+        chars = sum(len(row.get("summary") or "") for row in scope)
+        count = len(scope)
+        over_count = count > int(cfg.permanent_cap or 0)
+        over_chars = chars > int(cfg.permanent_budget_chars or 0)
+        return {
+            "live": live,
+            "count": count,
+            "chars": chars,
+            "over_count": over_count,
+            "over_chars": over_chars,
+            "over": over_count or over_chars,
+        }
+
+    async def tidy_permanents(
+        self, sid, job_id=None, force=False, ids=None, rebuild=False, auto=False
+    ):
         """整理永久记忆：逐条 keep / extract / archive / split（只归档不删除）✓
 
         v2.18.19：加两个参数 ✓
@@ -2550,27 +2589,34 @@ class Engine:
                 await self.consolidate(sid)
             except Exception:                       # noqa: BLE001
                 logger.debug("[记忆·Z] 整理前的相似合并失败（继续整理）", exc_info=True)
-        if force:
-            # 防抖：同一会话 10 秒内只允许强制整理一次 ✓
+        if force and not auto:
+            # 防抖：同一会话 10 秒内只允许**手动**强制整理一次 ✓
+            # 自动超限提取不受此防抖限制（否则 10 条要等 100 秒）。
             now = time.time()
             last = self._tidy_forced_at.get(sid)
             if last is not None and now - last < 10:
                 self._note_tidy(sid, "刚整理过（10 秒防抖），稍后再试")
                 return 0
             self._tidy_forced_at[sid] = now
-        live = await self.store.call("permanent_records", sid)
+        pressure = await self.permanent_pressure(sid, cfg)
+        live = pressure["live"]
         # 任务本身就是「整理一次」：容量闸门只在**自动触发**处判断
         # （注入侧/定时器超上限才排队）；被 Bot 或人手动叫起来的这一次，
         # 不管有没有超上限都要真的看一遍——否则会出现"日志说整理完成、其实什么都没做"。
         if not live:
             self._note_tidy(sid, "该会话还没有永久记忆")
             return 0
-        over_cap = len(live) > cfg.permanent_cap
-        wanted = len(live) if over_cap else cfg.permanent_tidy_batch
+        over_pressure = pressure["over"]
+        if over_pressure:
+            over_by = max(0, int(pressure["count"]) - int(cfg.permanent_cap or 0))
+            wanted = min(len(live), max(cfg.permanent_tidy_batch, over_by))
+        else:
+            wanted = cfg.permanent_tidy_batch
         candidates = await self.store.call(
             "tidy_candidates",
             sid,
-            0 if force else cfg.permanent_tidy_days,   # force → 0 天 = 无视冷却 ✓
+            # 超条数/超字符时绕过 14 天冷却；否则保持原有冷却。
+            0 if (force or over_pressure) else cfg.permanent_tidy_days,
             max(wanted, 1),
             ids,
         )
@@ -2624,14 +2670,83 @@ class Engine:
             await self.enqueue("fact_merge", sid, automatic=True)
         except Exception:                           # noqa: BLE001
             logger.debug("[记忆·Z] 触发事实合并失败（不影响整理）", exc_info=True)
-        return await self.apply_tidy(sid, candidates, aliases, names, output, job_id)
+        return await self.apply_tidy(
+            sid, candidates, aliases, names, output, job_id,
+            force_remove=bool(rebuild),
+        )
 
-    async def apply_tidy(self, sid, candidates, aliases, names, output, job_id=None):
-        """执行整理结论：keep 顺手修正字段；其余一律归档（原文保留、可回滚）。"""
+    async def auto_extract_lowest(
+        self, sid, cfg, protect_id="", max_attempts=None
+    ):
+        """超限且普通整理没降下来时，逐条强制移出最低保留度条目。
+
+        返回 ``{"attempts", "extracted", "resolved", "stalled"}``。
+        保护 ``protect_id``（刚写入的那条）在本轮不参与；下一轮正常触发才可选中。
+        """
+        limit = int(max_attempts or getattr(cfg, "permanent_overcap_extract_max", 10) or 10)
+        pressure = await self.permanent_pressure(sid, cfg)
+        if not pressure["over"]:
+            return {"attempts": 0, "extracted": [], "resolved": True, "stalled": False}
+        extracted, attempts = [], 0
+        all_sessions = cfg.recall_scope == "global"
+        while pressure["over"] and attempts < max(1, limit):
+            rows = await self.store.call(
+                "tidy_candidates",
+                "" if all_sessions else sid,
+                0,
+                4 if protect_id else 1,
+                None,
+                all_sessions,
+            )
+            rows = [row for row in rows if row.get("id") != protect_id]
+            if not rows:
+                return {
+                    "attempts": attempts, "extracted": extracted,
+                    "resolved": False, "stalled": True,
+                }
+            target = rows[0]
+            before = (pressure["count"], pressure["chars"])
+            try:
+                await self.tidy_permanents(
+                    target.get("sid") or sid,
+                    force=True, ids=[target["id"]],
+                    rebuild=True, auto=True,
+                )
+            except Exception:
+                logger.debug("[记忆·Z] 自动超限提取失败", exc_info=True)
+                return {
+                    "attempts": attempts, "extracted": extracted,
+                    "resolved": False, "stalled": True,
+                }
+            attempts += 1
+            pressure = await self.permanent_pressure(sid, cfg)
+            if (pressure["count"], pressure["chars"]) >= before:
+                return {
+                    "attempts": attempts, "extracted": extracted,
+                    "resolved": False, "stalled": True,
+                }
+            extracted.append(target["id"])
+        return {
+            "attempts": attempts,
+            "extracted": extracted,
+            "resolved": not pressure["over"],
+            "stalled": False,
+        }
+
+    async def apply_tidy(
+        self, sid, candidates, aliases, names, output, job_id=None,
+        force_remove=False,
+    ):
+        """执行整理结论：keep 顺手修正字段；其余一律归档（原文保留、可回滚）。
+
+        ``force_remove`` 用于「完全重新提取」/自动超限提取：无论模型返回
+        keep 还是 split，都必须让该条离开活跃记忆（有 facts 先提炼，原文归档）。
+        """
         known = {row["id"] for row in candidates}
         by_id = {row["id"]: row for row in candidates}
         items, applied, touched = [], 0, []
         skipped = 0
+        seen_targets = set()
         for verdict in output.get("items", []):
             record_id = aliases.get(verdict.get("id", ""))
             if record_id not in known:
@@ -2646,8 +2761,20 @@ class Engine:
                 )
                 continue
             row = by_id[record_id]
-            action = verdict["action"]
+            seen_targets.add(record_id)
+            raw_action = verdict["action"]
+            facts_payload = list(verdict.get("facts") or [])
+            action = raw_action
+            if force_remove:
+                # 强制路径不信任模型的 keep/split/archive：有事实就提炼，
+                # 没有事实才归档；原条都一定会 active=False。
+                if facts_payload:
+                    action = "extract"
+                elif raw_action not in ("extract", "archive"):
+                    action = "archive"
             reason = "[整理] " + str(verdict.get("reason") or "").strip()[:200]
+            if force_remove:
+                reason = "[强制移出] " + reason.removeprefix("[整理] ")
             patch = {}
             if verdict.get("category"):
                 patch["category"] = str(verdict["category"])[:40]
@@ -2658,7 +2785,7 @@ class Engine:
             if action == "split" and verdict.get("keep_content"):
                 patch["summary"] = verdict["keep_content"]
             if action == "split" and patch.get("summary"):
-                patch.pop("active")  # split：约束那段留在常驻
+                patch.pop("active")  # split：约束那段留在常驻（force_remove 不会走到）
             if patch:
                 # ★ v2.20.1：整理是**长任务**（先跑模型再逐条应用）⇒ 期间记录可能被并发写
                 #   旧 revision 会 Conflict ✗ ⇒ 冲突时重读再试一次（仍失败则照旧抛出 ✓ 不吞错）
@@ -2679,11 +2806,16 @@ class Engine:
                 if not _edit_ok:
                     logger.warning("[记忆·Z] 整理未应用（记录变化频繁）：%s", record_id)
             facts = []
-            for fact in verdict.get("facts", []):
+            for fact in facts_payload:
                 # ★ 2026-09-27：**动作白名单** —— 只收 extract/split 的事实 ✓
                 #   指令写了"keep/archive 不给 facts" ✓ 但模型不保证守 ✗ ⇒ 落库再拦一道 ✓
-                if str(verdict.get("action") or "") not in ("extract", "split"):
-                    logger.debug("[记忆·Z] 忽略 %s 动作附带的事实", verdict.get("action"))
+                # 强制移出时只要模型给了 facts，就按 extract 处理（信息优先保留）。
+                if force_remove:
+                    if action != "extract":
+                        logger.debug("[记忆·Z] 强制移出但动作是 archive，忽略附带事实")
+                        break
+                elif raw_action not in ("extract", "split"):
+                    logger.debug("[记忆·Z] 忽略 %s 动作附带的事实", raw_action)
                     break
                 facts.append(
                     {
@@ -2728,6 +2860,31 @@ class Engine:
             )
             touched.append(record_id)
             applied += 1 if action != "keep" else 0
+        if force_remove:
+            # 模型可能不返回目标、或并发冲突导致 patch 没落到 active=False。
+            # 强制路径最后逐条复查，必要就兜底归档，保证“下一条轮得到”。
+            for row in candidates:
+                record_id = row["id"]
+                fresh = await self.store.call("get", record_id)
+                if not fresh or not fresh.get("active"):
+                    continue
+                note = "[强制移出] 整理输出未移出该条，兜底归档"
+                await self.store.call(
+                    "edit", "record", record_id, fresh["revision"],
+                    {"active": False}, note,
+                )
+                items.append(
+                    {
+                        "kind": "record",
+                        "target": record_id,
+                        "action": "archive",
+                        "note": note,
+                        "before": (fresh.get("summary") or "")[:400],
+                    }
+                )
+                touched.append(record_id)
+                if record_id not in seen_targets:
+                    applied += 1
         if job_id and items:
             await self.store.call("add_job_items", job_id, items)
         if touched:
@@ -2755,6 +2912,7 @@ class Engine:
             try:
                 # ★ 每轮迭代**必须重置** ✗ 否则上一条的重提取状态会串到下一条 ✓
                 _force, _ids, _rebuild = False, None, False
+                _protect_id = ""
                 _raw = (job.get("detail") or "").strip()
                 if _raw:
                     try:
@@ -2764,13 +2922,44 @@ class Engine:
                         _ids = _d.get("ids") or None
                         # ★ 2026-09-19：完全重提取（本次不允许 keep ✓）只对单条有效 ✓
                         _rebuild = bool(_d.get("rebuild")) and bool(_ids)
+                        # 刚写入的永久记忆：自动超限提取第一轮保护它。
+                        _protect_id = str(_d.get("protect_id") or "")
                     except Exception:
                         self._note_tidy(job["sid"], "任务参数无法解析，已按默认（按冷却）执行")
+                before = await self.permanent_pressure(job["sid"], cfg)
                 applied = await self.tidy_permanents(
                     job["sid"], job["id"], force=_force, ids=_ids,
                     rebuild=_rebuild,
                 )
-                if applied:
+                after = await self.permanent_pressure(job["sid"], cfg)
+                auto_info = None
+                if after["over"]:
+                    reduced = (
+                        after["count"] < before["count"]
+                        or after["chars"] < before["chars"]
+                    )
+                    if not reduced and getattr(
+                        cfg, "permanent_overcap_extract_lowest", True
+                    ):
+                        auto_info = await self.auto_extract_lowest(
+                            job["sid"], cfg, protect_id=_protect_id,
+                            max_attempts=getattr(
+                                cfg, "permanent_overcap_extract_max", 10
+                            ),
+                        )
+                        after = await self.permanent_pressure(job["sid"], cfg)
+                        reduced = (
+                            after["count"] < before["count"]
+                            or after["chars"] < before["chars"]
+                        )
+                    if after["over"] and not reduced:
+                        self._hold_maintenance("tidy", job["sid"], cfg)
+                if not after["over"] or (
+                    after["count"] < before["count"]
+                    or after["chars"] < before["chars"]
+                ):
+                    self._maint_retry.pop(("tidy", job["sid"]), None)
+                if applied or (auto_info and auto_info.get("attempts")):
                     # ★ 整理会**提炼出事实**（extract/split ✓）⇒ 这些新事实要照常参与去重合并 ✓
                     # 原来只 `add_facts` ✗ **没排合并** ⇒ 提炼出来的重复事实要等下一个触发点
                     # （用户 2026-09-17 要求核查"提取永久记忆事实"链路 ✓ 这是缺口 ✓）
@@ -2781,6 +2970,15 @@ class Engine:
                     else (self.last_tidy_notes.get(job["sid"])
                           or "本次没有需要调整的永久记忆")
                 )
+                if auto_info:
+                    if auto_info.get("extracted"):
+                        detail += "；自动提取 %d 条最低保留度记忆" % len(
+                            auto_info["extracted"]
+                        )
+                    if auto_info.get("stalled"):
+                        detail += "；仍超限且自动提取无进展，稍后重试"
+                    elif auto_info.get("attempts") and after["over"]:
+                        detail += "；达到单次自动提取上限，下次触发继续"
                 await self.store.call("finish", job["id"], "completed", detail)
                 logger.info(
                     "[记忆·Z] 永久记忆整理完成（%s），耗时 %.1f 秒",
@@ -3118,6 +3316,13 @@ class Engine:
                         " · " + report["note"] if report.get("note") else "",
                     )
                 )
+                pressure = await self.permanent_pressure(job["sid"], cfg)
+                if pressure["over"] and int(report.get("merged") or 0) == 0:
+                    # 超限且没有相似可合并：不要让 completed job 被每轮重新打开。
+                    self._hold_maintenance("dedupe", job["sid"], cfg)
+                    detail += "；超限但无可合并相似项，稍后重试"
+                elif not pressure["over"]:
+                    self._maint_retry.pop(("dedupe", job["sid"]), None)
                 await self.store.call("finish", job["id"], "completed", detail)
                 logger.info(
                     "[记忆·Z] 永久记忆合并完成（%s），耗时 %.1f 秒",

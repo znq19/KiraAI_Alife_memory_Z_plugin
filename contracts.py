@@ -360,10 +360,16 @@ class Settings(Strict):
     permanent_tidy_enabled: bool = True
     # 写入永久记忆后直接整理一次（即使没触发去重）
     permanent_tidy_on_write: bool = True
-    permanent_cap: int = Field(default=10, ge=1, le=200)
-    permanent_budget_chars: int = Field(default=3000, ge=200, le=100000)
+    permanent_cap: int = Field(default=30, ge=1, le=200)
+    permanent_budget_chars: int = Field(default=5000, ge=200, le=100000)
     permanent_tidy_batch: int = Field(default=10, ge=1, le=100)
     permanent_tidy_days: int = Field(default=14, ge=0, le=3650)
+    # 超限整理仍没有降低时：自动把保留度最低的一条强制提炼/归档，直到回到预算内。
+    permanent_overcap_extract_lowest: bool = True
+    # 单次自动维护最多连续强制提取几条（有进展时下次触发继续，不是永久停止）。
+    permanent_overcap_extract_max: int = Field(default=10, ge=1, le=100)
+    # 自动维护无进展时的重试间隔（分钟）；只延迟下一次自动触发，不是永久停用。
+    permanent_tidy_retry_minutes: int = Field(default=10, ge=1, le=1440)
     # ★ 2026-09-19（用户定的规矩）：**完全重新提取**只能对**单条** ✓
     #   全局（工作台弹窗 / Bot 全局）一律禁止 ✗ ⇒ /jobs 会拦 ✓
     #   理由：全局强制会把"本来好好的"事实也重写一遍 ✗（质量风险 ✓ 不只是 token ✓）

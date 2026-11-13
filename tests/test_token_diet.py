@@ -772,8 +772,10 @@ class BotIssuedTaskVisibleCase(unittest.TestCase):
         code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
         self.assertIn("automatic=False,", code, "bot 的 tidy 没标成手动 ✗（会没日志 ✓）")
         self.assertIn("automatic=False,        # 工作台按钮", code, "工作台按钮没标成手动 ✗")
-        self.assertIn('enqueue("tidy", value.sid, automatic=False)', code,
+        self.assertIn('"tidy", value.sid, automatic=False', code,
                       "bot 写永久记忆后的整理没标成手动 ✗")
+        self.assertIn('"protect_id": record_id', code,
+                      "写后整理没有保护刚写入的条目 ✗")
 
     def test_truly_automatic_ones_stay_automatic(self):
         """真正自动的（阈值兜底 / 调度器）保持 automatic=True ✓ 空转时仍可静默 ✓"""
@@ -1000,8 +1002,8 @@ class TidyForceWiringCase(unittest.TestCase):
     def test_engine_reads_force_from_detail(self):
         code = self._code("engine.py")
         self.assertIn('_force = bool(_d.get("force"))', code, "引擎没解析 force ✗")
-        self.assertIn("0 if force else cfg.permanent_tidy_days", code,
-                      "force 没被换成 0 天（=没无视冷却）✗")
+        self.assertIn("0 if (force or over_pressure) else cfg.permanent_tidy_days", code,
+                      "force/超限没被换成 0 天（=没无视冷却）✗")
 
 
 class TidyUnknownTargetCase(unittest.TestCase):

@@ -143,7 +143,7 @@ def test_four_paths_are_distinguished():
     assert 'enqueue("tidy", job["sid"], automatic=True)' in ENG
     assert 'enqueue("tidy", sid, automatic=True)' in ENG
     # ②
-    assert 'enqueue("tidy", value.sid, automatic=False)' in MAIN
+    assert '"tidy", value.sid, automatic=False' in MAIN
     # ③ 前端全局：force 由模式决定，但没有 rebuild ✓
     assert 'payload.force = mode === "all";' in APP
     assert "rebuild" not in APP[APP.index('payload.force = mode === "all"') - 400 : APP.index('payload.force = mode === "all"') + 400], \
