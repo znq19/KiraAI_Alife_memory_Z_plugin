@@ -285,6 +285,7 @@ def test_get_profile_marks_cross_session_common_source(tmp_path):
     out = asyncio.run(plugin.get_profile(event, subject="test:u"))
     assert "别的群约定：周五晚点名" in out
     assert "@" in out, "主动画像必须标出来源会话"
+    assert "会话码：" in out and "别的群" in out, "短码必须有可解析的会话名图例"
 
 
 def test_common_scope_round_trips_through_storage(tmp_path):

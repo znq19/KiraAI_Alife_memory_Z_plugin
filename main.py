@@ -2766,6 +2766,7 @@ class AlifeMemoryPlugin(BasePlugin):
         _pool_n = self._tool_expand(_want_n) if _has_q else _want_n
         profiles = []
         merge_rows = []
+        session_names = {}
         for row in rows[:3]:
             profile = await self.store.call(
                 "profile",
@@ -2798,9 +2799,24 @@ class AlifeMemoryPlugin(BasePlugin):
                         str(f.get("sid")) for f in rows_flat
                         if f.get("sid") and str(f.get("sid")) != str(event.sid)
                     }
-                    _session_codes = await self.shortmap(_sids) if _sids else {}
+                    _src_ids = {
+                        str(f.get("src")) for f in rows_flat if f.get("src")
+                    }
+                    _codes = await self.shortmap(_sids | _src_ids) if (_sids or _src_ids) else {}
+                    _session_codes = {
+                        sid: _codes.get(sid, sid) for sid in _sids
+                    }
+                    if _sids:
+                        for ent in await self.store.call(
+                            "entities", ids=list(_sids), limit=max(1, len(_sids))
+                        ):
+                            if ent.get("name"):
+                                session_names[
+                                    _session_codes.get(ent["id"], ent["id"])
+                                ] = ent["name"]
                     view = iter(bot_facts(
-                        rows_flat, event.sid, session_codes=_session_codes
+                        rows_flat, event.sid, short=_codes.get,
+                        session_codes=_session_codes,
                     ))
                     profile["categories"] = {
                         category: [next(view) for _ in facts]
@@ -2828,7 +2844,8 @@ class AlifeMemoryPlugin(BasePlugin):
             event,
             {"ok": True, "profiles": profiles,
              **({"refine": {"pool": _pool_n, "kept": _kept_n}}
-                if _pool_n > _kept_n and _kept_n else {})},
+                if _pool_n > _kept_n and _kept_n else {}),
+             **({"session_names": session_names} if session_names else {})},
         )
 
     async def correct_name(self, event, entity_id, name, revision, reason):
@@ -4152,6 +4169,13 @@ class AlifeMemoryPlugin(BasePlugin):
                         )
                 if prof.get("rel"):
                     out_lines.append("（关系 %d 条）" % len(prof["rel"]))
+            _session_names = value.get("session_names")
+            if isinstance(_session_names, dict) and _session_names:
+                out_lines.append(
+                    "会话码：" + " ".join(
+                        "%s=%s" % (k, v) for k, v in _session_names.items()
+                    )
+                )
             if out_lines:
                 return "\n".join(out_lines)
         entities = value.get("entities")                   # ④ 人物与群名

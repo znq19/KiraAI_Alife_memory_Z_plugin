@@ -482,7 +482,7 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
 - **永久记忆展示**：被动行补类别码和 `★重要度`（重要度 5 也显示）；无类别时不显示“未分类”或占位符；`rule` 显示 `rl=铁律`。
 - **common 常识分类**：新增 `common`（`cm`），压缩/整理可归类，复用普通事实的实体/关键词/内容召回；不常驻、不设 `common_top_k`/`common_chars`/`common_core`。命中后按 `【常识｜世界】` / `【常识｜场域】` 单独成块，普通 facts 不重复。
 - **作用域**：`common_scope=world|field`；field 由 `common_field_mode` 控制跨会话：默认 `allow`（其他会话 field 留在普通事实块并带 `@会话`）、`filter`（仅当前会话）、`lift`（其他会话也进常识块并带 `@会话`）；world 可跨会话。
-- **主动画像**：跨会话 common 行补 `@会话` 短码；`filter` 下其他会话 field 不进入画像。
+- **主动画像**：跨会话 common 行补 `@会话` 短码，并输出 `会话码：xxx=会话名`，可直接对应；`filter` 下其他会话 field 不进入画像。
 - **轮换一致**：common 从轮换槽进来同样进常识块，不加“轮换”标记；非 common 轮换事实仍按普通事实展示，无特殊标记。
 - **方案 B 补回**：主召回拆出的 common 条数 N 触发 `ceil(N×比例)` 条普通事实补回，默认 0.5、上限 5；轮换 common 不计入 N。设置页可配 `common_field_mode`（allow/filter/lift）、`common_compensate_enabled` / `common_compensate_ratio` / `common_compensate_max`。
 - **来源/实体**：common 的 `sources`、`subject`、`importance`、`attach_evidence` 与普通事实完全一致，不另造来源；被动事实行仍不显示来源指针。
