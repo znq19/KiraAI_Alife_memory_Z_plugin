@@ -54,6 +54,7 @@ from .retrieval import (
     CATEGORY_RANK,
     CATEGORY_CODES,
     CATEGORY_CODE_LEGEND,
+    FACT_RELATION_RULE,
     archives_flat,
     FACT_VIEW_GROUPED,
     pack_facts,
@@ -136,7 +137,9 @@ NEIGHBOR_VERB_PREDICATES = {
 
 
 COMMON_CATEGORY = "common"
-_GROUPED_RULES = _GROUPED_FACT_DOC + CATEGORY_CODE_LEGEND + "\n"
+_GROUPED_RULES = (
+    _GROUPED_FACT_DOC + FACT_RELATION_RULE + "\n" + CATEGORY_CODE_LEGEND + "\n"
+)
 _COMMON_RULE = (
     "【常识】块是世界知识/场域规则，仍按事实读；※只是标识；"
     "world 可跨会话，场域只在本会话。\n"

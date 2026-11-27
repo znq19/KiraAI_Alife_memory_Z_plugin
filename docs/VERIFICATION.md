@@ -5,9 +5,9 @@
 - 新增 `common` 常识分类与 `common_scope=world|field`；被动注入独立 `【常识】` 块，普通 facts 不重复；`common_field_mode=allow|filter|lift`（默认 allow）控制其他会话 field 的展示/过滤/拎出；主动画像跨会话行带 `@会话` 与 `会话码：xxx=会话名` 图例。
 - common 按普通事实通道召回（实体/关键词/内容/下沉/轮换），不设 common_top_k/common_chars/common_core；方案 B 补回普通事实 `ceil(N×0.5)`、上限 5，轮换 common 不计 N。
 - 图例补 `cm=常识`、`rl=铁律`（grouped）；审计支持 category-only correct；永久记忆被动行补类别/重要度且无类别不显示占位。
-- KiraAI **3.2.0-beta.1**：`1124 passed + 16 subtests`，0 failed。
-- KiraAI **3.1.2**：`1124 passed + 16 subtests`，0 failed。
-- KiraAI **3.3.0**：`1124 passed + 16 subtests`，0 failed。
+- KiraAI **3.2.0-beta.1**：`1123 passed + 16 subtests`，0 failed。
+- KiraAI **3.1.2**：`1123 passed + 16 subtests`，0 failed。
+- KiraAI **3.3.0**：`1123 passed + 16 subtests`，0 failed。
 
 ## 2.22.24（2026-10-20）
 

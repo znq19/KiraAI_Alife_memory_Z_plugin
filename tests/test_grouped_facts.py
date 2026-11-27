@@ -67,7 +67,6 @@ def test_same_subject_never_repeats():
 
 def test_rules_block_describes_grouped_layout():
     """给模型每轮看的规则块必须描述分组格式，且不得残留旧字段名（v2.17.0 改格式时漏改过 ✗）。"""
-    import importlib, types
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "记忆简报" in source or "按主体分组" in source
     _g = source[source.index("_GROUPED_FACT_DOC = (") : source.index("MEMORY_RULES = (")]
@@ -105,7 +104,7 @@ def test_relation_omits_own_subject_only():
     row2 = retrieval.bot_facts_grouped([other], "", codes=codes)["n1"][0]
     assert row2[3] == "n3>养的猫>橘子", "非本组主体必须写全（否则会错意）"
 
-    legend = retrieval.FACT_GROUP_LEGEND
+    legend = retrieval.FACT_RELATION_RULE
     assert "省略主体即本组主体" in legend, "图例必须说明省略含义"
 
     """示例必须是抽象占位：不得出现具体人名/具体事件 —— 否则每个用户的提示词里都会凭空多出一个陌生人 ✗

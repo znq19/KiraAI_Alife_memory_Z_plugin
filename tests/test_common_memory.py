@@ -102,22 +102,29 @@ def test_legend_is_static_and_grouped_only():
     flat = module.memory_rules("flat")
     assert "类别码：ev=事件" in grouped
     assert "cm=常识" in grouped and "rl=铁律" in grouped
+    assert "省略主体即本组主体" in grouped
     assert "类别码：ev=事件" not in flat
     assert "【常识】块是世界知识" in grouped and "【常识】块是世界知识" in flat
     assert grouped.index("类别码：ev=事件") < grouped.index("要精确到分钟")
 
 
-def test_common_world_fact_is_split_into_common_block(tmp_path):
+def test_common_world_facts_are_split_and_not_category_capped(tmp_path):
     plugin = build_plugin(tmp_path)
-    add_fact(plugin, "common", "世界", "世界常识：模型版本会变化", common_scope="world")
+    for i in range(5):
+        add_fact(
+            plugin, "common", "世界", "世界常识%d：模型版本会变化" % i,
+            common_scope="world",
+        )
     add_fact(plugin, "profile", "小明", "小明喜欢茶", importance=7)
     block = inject(plugin, "你还记得世界常识吗")
     assert "【常识｜世界】※" in block
-    assert "cm 世界常识：模型版本会变化" in block
+    for i in range(5):
+        assert "cm 世界常识%d：模型版本会变化" % i in block
     assert "小明喜欢茶" in block
     assert "【事实】" in block
     # 不重复：同一条 common 不应同时出现在普通 facts 区域
-    assert block.count("世界常识：模型版本会变化") == 1
+    for i in range(5):
+        assert block.count("世界常识%d：模型版本会变化" % i) == 1
 
 
 def test_common_field_allow_puts_other_session_in_normal_facts(tmp_path):
@@ -203,18 +210,6 @@ def _add_evidence_fact(plugin, category, subject, content, importance=8,
                        common_scope=""):
     add_fact(plugin, category, subject, content,
              importance=importance, common_scope=common_scope)
-
-
-def test_common_has_no_category_top_k_cap(tmp_path):
-    plugin = build_plugin(tmp_path)
-    for i in range(5):
-        _add_evidence_fact(
-            plugin, "common", "世界", "常识%d：贝塔" % i, common_scope="world",
-        )
-    block = inject(plugin, "贝塔")
-    assert "【常识｜世界】※" in block
-    for i in range(5):
-        assert "常识%d：贝塔" % i in block, "common 不应被 3 条上限截断"
 
 
 def test_common_compensation_refills_normal_facts(tmp_path):
