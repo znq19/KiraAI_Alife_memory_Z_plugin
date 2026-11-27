@@ -1029,6 +1029,17 @@
         "max_items": 10,
         "hint": "按顺序点击 = 回退优先级（最多 10 个）。某个模型失败会自动换下一个；全部失败才回落上面的单模型字段。面板里可上下调序。"
       },
+      "common_field_mode": {
+        "type": "string",
+        "name": "场域常识跨会话",
+        "default": "allow",
+        "description": "场域常识（common_scope=field）的跨会话策略：allow=其他会话的场域常识放普通事实块并保留 @会话（默认）；filter=仅当前会话，过滤其他会话；lift=其他会话也放进常识块，仍带 @会话。",
+        "options": [
+          "allow",
+          "filter",
+          "lift"
+        ]
+      },
       "common_compensate_enabled": {
         "type": "switch",
         "name": "常识分块后补回普通事实",

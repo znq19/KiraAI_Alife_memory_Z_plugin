@@ -286,10 +286,10 @@ def test_prompt_budget_is_enforced():
     """预算守卫 ✓：以后想往指令里加内容，必须先删再写（否则 token 只会一直涨 ✗）"""
     texts = _prompt_texts()
     # v2.18.9 只上调 AUDIT：560→620 ✓（COMMON 靠瘦身不涨）
-    # 原因：新增"回声防线"规则（records[].bot / evidence[].bot / only_self）
-    # ——这是有意识的安全规则增加 ✗ 不是无意的膨胀 ✓ 且已先挤掉原有冗余写法
+    # 2026-11-27：AUDIT 增 category 完整枚举（避免模型输出非法类别后重试）；
+    # 这是**安全枚举**，不是无意义膨胀，预算 620→700。
     assert len(texts["COMMON_INSTRUCTION"]) <= 620, "COMMON 超预算 %d" % len(texts["COMMON_INSTRUCTION"])
-    assert len(texts["AUDIT_INSTRUCTION"]) <= 620, "AUDIT 超预算 %d" % len(texts["AUDIT_INSTRUCTION"])
+    assert len(texts["AUDIT_INSTRUCTION"]) <= 700, "AUDIT 超预算 %d" % len(texts["AUDIT_INSTRUCTION"])
     # 2026-09-23：口径修正后 MEMORY_RULES 的真实长度（含 _GROUPED_FACT_DOC 拼接 ✓）
     # 同日精简去重（next_batch 原说 3 遍、expand 说明 2 遍、简报格式三句并一句）⇒ 767 → 680
     # 预算随之定为 690（留 10 字余量 ✓ 且此后**真实长度**才受守卫约束 ✓）

@@ -57,6 +57,7 @@ const fields = {
   cold_archive_path: "冷归档库文件路径",
   cold_archive_auto: "冷归档自动执行",
   inject_budget_ms: "每轮注入时间预算（毫秒）",
+  common_field_mode: "场域常识跨会话",
   common_compensate_enabled: "常识分块后补回普通事实",
   common_compensate_ratio: "常识补回比例",
   common_compensate_max: "常识补回上限（条）",
@@ -2055,6 +2056,9 @@ function renderConfig(values) {
                     global: "全局 · 跨用户跨会话",
                     linked: "同参与者 · 关联会话",
                     session: "当前会话",
+                    allow: "允许 · 其他会话放普通事实块",
+                    filter: "仅当前会话 · 过滤其他会话",
+                    lift: "允许 · 跨会话也放进常识块",
                   }[v] || v,
                 ) +
                 "</option>",

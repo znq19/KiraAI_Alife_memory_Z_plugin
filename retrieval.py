@@ -926,7 +926,7 @@ def overlap_hit(text, reply, min_hits=2):
     return False
 
 
-def bot_facts(facts, current_sid="", short=None, self_id=""):
+def bot_facts(facts, current_sid="", short=None, self_id="", session_codes=None):
     """给 Bot 看的精简事实视图：只留判断与追溯必需的字段。
 
     内部簿记（fingerprint/deleted/revision/merge_pending/audited）、
@@ -951,6 +951,8 @@ def bot_facts(facts, current_sid="", short=None, self_id=""):
             item["rel"] = relations
         if fact.get("sid") and fact["sid"] != current_sid:
             item["sid"] = fact["sid"]
+            if session_codes:
+                item["from"] = session_codes.get(fact["sid"], fact["sid"])
             if fact.get("src_user"):
                 item["by"] = fact["src_user"]
         if self_id and fact.get("src_user") == self_id:

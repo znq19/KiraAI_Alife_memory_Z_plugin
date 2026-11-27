@@ -148,8 +148,23 @@ def common_scope_of(fact):
         return ""
     return "field" if str((fact or {}).get("common_scope") or "") == "field" else "world"
 
-def common_visible(fact, sid):
-    return common_scope_of(fact) != "field" or str((fact or {}).get("sid") or "") == str(sid)
+def common_visible(fact, sid, cfg=None):
+    """field 常识是否可见：filter 只留当前会话；allow/lift 保留（展示位置另定）。"""
+    if common_scope_of(fact) != "field":
+        return True
+    if str((fact or {}).get("sid") or "") == str(sid):
+        return True
+    return cfg is None or str(getattr(cfg, "common_field_mode", "allow")) != "filter"
+
+def common_block_candidate(fact, sid, cfg):
+    """是否进【常识】块；allow 的其他会话 field 留在普通事实块。"""
+    if str((fact or {}).get("category") or "") != COMMON_CATEGORY:
+        return False
+    if common_scope_of(fact) != "field":
+        return True
+    if str((fact or {}).get("sid") or "") == str(sid):
+        return True
+    return str(getattr(cfg, "common_field_mode", "allow")) == "lift"
 
 MEMORY_RULES = (
     "你具有持续的分层记忆。用户消息里的 alife_memory（m 字段是记忆简报）"
@@ -1320,7 +1335,7 @@ class AlifeMemoryPlugin(BasePlugin):
             rows = [
                 row for row in rows
                 if row.get("category") != COMMON_CATEGORY
-                and common_visible(row, sid)
+                and common_visible(row, sid, cfg)
                 and not is_tool_result(row.get("content"))
                 and not media_only(row.get("content") or "", keep_names)
                 and not low_value_self(
@@ -2764,7 +2779,7 @@ class AlifeMemoryPlugin(BasePlugin):
             if profile:
                 # field 常识只属于当前会话；主动画像也不能跨会话泄漏。
                 for _cat, _facts in list(profile.get("categories", {}).items()):
-                    _kept = [f for f in _facts if common_visible(f, event.sid)]
+                    _kept = [f for f in _facts if common_visible(f, event.sid, cfg)]
                     if _kept:
                         profile["categories"][_cat] = _kept
                     else:
@@ -2779,7 +2794,14 @@ class AlifeMemoryPlugin(BasePlugin):
                     # 压完就没有 id 了，不能从这里再取。
                     merge_rows.extend(rows_flat)
                     await self.store.call("attach_evidence", rows_flat)
-                    view = iter(bot_facts(rows_flat, event.sid))
+                    _sids = {
+                        str(f.get("sid")) for f in rows_flat
+                        if f.get("sid") and str(f.get("sid")) != str(event.sid)
+                    }
+                    _session_codes = await self.shortmap(_sids) if _sids else {}
+                    view = iter(bot_facts(
+                        rows_flat, event.sid, session_codes=_session_codes
+                    ))
                     profile["categories"] = {
                         category: [next(view) for _ in facts]
                         for category, facts in profile.get("categories", {}).items()
@@ -3290,13 +3312,24 @@ class AlifeMemoryPlugin(BasePlugin):
         # 只在主召回里出现的 common 才计入方案 B 的 N；轮换槽带来的 common
         # 本来就不占普通事实预算，不触发补回。
         _all_fact_ids = {f.get("id") for f in facts if f.get("id")}
-        common_facts = [
-            f for f in facts
-            if f.get("category") == COMMON_CATEGORY and common_visible(f, sid)
-        ]
-        normal_facts = [
-            f for f in facts if f.get("category") != COMMON_CATEGORY
-        ]
+        common_facts, normal_facts = [], []
+        _common_block_ids = set()
+        for fact in facts:
+            if fact.get("category") != COMMON_CATEGORY:
+                normal_facts.append(fact)
+                continue
+            if common_block_candidate(fact, sid, cfg):
+                common_facts.append(fact)
+                _common_block_ids.add(fact.get("id"))
+                continue
+            # allow：其他会话的 field 常识留在普通事实块，按现有 @会话 规则展示。
+            if (
+                common_scope_of(fact) == "field"
+                and str(fact.get("sid") or "") != str(sid)
+                and str(getattr(cfg, "common_field_mode", "allow")) == "allow"
+            ):
+                normal_facts.append(fact)
+            # filter：其他会话的 field 直接不注入。
         _main_common = [
             f for f in common_facts if f.get("id") not in _rotation_fact_ids
         ]
@@ -3529,10 +3562,10 @@ class AlifeMemoryPlugin(BasePlugin):
             facts = [fact for fact in facts if fact["id"] not in dropped]
         with_evidence = await self.store.call("attach_evidence", facts)
         common_evidence = [
-            f for f in with_evidence if f.get("category") == COMMON_CATEGORY
+            f for f in with_evidence if f.get("id") in _common_block_ids
         ]
         normal_evidence = [
-            f for f in with_evidence if f.get("category") != COMMON_CATEGORY
+            f for f in with_evidence if f.get("id") not in _common_block_ids
         ]
         fact_shorts = await self.shortmap(
             [v for f in with_evidence for v in (f.get("src"), f.get("subject"), f.get("sid"))
@@ -3546,7 +3579,7 @@ class AlifeMemoryPlugin(BasePlugin):
         for _scope in ("world", "field"):
             _rows = [
                 f for f in common_evidence
-                if common_scope_of(f) == _scope and common_visible(f, sid)
+                if common_scope_of(f) == _scope and common_visible(f, sid, cfg)
             ]
             if _rows:
                 _packed = pack_facts(
@@ -4111,9 +4144,11 @@ class AlifeMemoryPlugin(BasePlugin):
                         # `src` = 这条事实的**来源记录短码** ✓ ⇒ 用 [短码] 保留 ✓
                         #   （bot 要能引用来源 ✓ 集成测试钉着这一点 ✓）
                         src = ("[%s]" % row["src"]) if row.get("src") else ""
+                        from_sid = ("@" + str(row["from"])) if row.get("from") else ""
                         out_lines.append(
-                            ("%s %s｜%s %s %s %s" % (cat, who, body, mark, when, src)
-                             ).replace("  ", " ").strip()
+                            ("%s %s｜%s %s %s %s%s" % (
+                                cat, who, body, mark, when, src, from_sid,
+                            )).replace("  ", " ").strip()
                         )
                 if prof.get("rel"):
                     out_lines.append("（关系 %d 条）" % len(prof["rel"]))
@@ -4811,7 +4846,7 @@ class AlifeMemoryPlugin(BasePlugin):
             hide_pending=self.settings.merge_pending_hide,
             importance_first=True,
         )
-        rows = [r for r in rows if common_visible(r, event.sid)]
+        rows = [r for r in rows if common_visible(r, event.sid, self.settings)]
         # v2.18.74：主动召回（overview）也吃 JEV；2026-09-25 起先扩池再精修 ✓
         # 这里顺序价值最直接：取回的事实会被**标记为已见** ⇒
         # 顺序决定「模型先看到哪些、哪些被这轮消耗掉」✓

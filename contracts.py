@@ -523,6 +523,7 @@ class Settings(Strict):
 
     # ── v2.22.25：common 分块后，普通事实的小额补回（方案 B）──────────
     # N 只统计主召回拆出的 common；轮换槽来的 common 本来就不占普通预算，不参与补回。
+    common_field_mode: Literal["allow", "filter", "lift"] = "allow"
     common_compensate_enabled: bool = True
     common_compensate_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
     common_compensate_max: int = Field(default=5, ge=0, le=20)

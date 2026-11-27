@@ -120,14 +120,39 @@ def test_common_world_fact_is_split_into_common_block(tmp_path):
     assert block.count("世界常识：模型版本会变化") == 1
 
 
-def test_common_field_fact_does_not_leak_to_other_session(tmp_path):
+def test_common_field_allow_puts_other_session_in_normal_facts(tmp_path):
+    """默认 allow：其他会话 field 不拎进常识块，按普通事实块 + @会话 展示。"""
     plugin = build_plugin(tmp_path)
     add_fact(
         plugin, "common", "本群", "本群约定：周五晚点名",
         common_scope="field", sid="test:gm:other",
     )
     block = inject(plugin, "你还记得本群约定吗")
+    assert "周五晚点名" in block
+    assert "【常识｜场域】" not in block
+    assert "@" in block
+
+
+def test_common_field_filter_drops_other_session(tmp_path):
+    plugin = build_plugin(tmp_path, common_field_mode="filter")
+    add_fact(
+        plugin, "common", "本群", "本群约定：周五晚点名",
+        common_scope="field", sid="test:gm:other",
+    )
+    block = inject(plugin, "你还记得本群约定吗")
     assert "周五晚点名" not in block
+
+
+def test_common_field_lift_puts_other_session_in_common_block(tmp_path):
+    plugin = build_plugin(tmp_path, common_field_mode="lift")
+    add_fact(
+        plugin, "common", "本群", "本群约定：周五晚点名",
+        common_scope="field", sid="test:gm:other",
+    )
+    block = inject(plugin, "你还记得本群约定吗")
+    assert "【常识｜场域】※" in block
+    assert "周五晚点名" in block
+    assert "@" in block
 
 
 def test_common_field_fact_is_visible_in_own_session(tmp_path):
@@ -244,6 +269,22 @@ def test_common_merge_preserves_scope_and_rejects_cross_scope(tmp_path):
     third = [f["id"] for f in plugin.store.facts(SID, limit=10) if f["id"] != target][0]
     with pytest.raises(ValueError):
         plugin.store.merge_facts(target, [third], "污染", "跨作用域")
+
+
+def test_get_profile_marks_cross_session_common_source(tmp_path):
+    plugin = build_plugin(tmp_path)
+    plugin.store.observe_name("test:u", "小明", observed=1.0)
+    plugin.store.observe_name(
+        "test:gm:other", "别的群", kind="session", observed=1.0
+    )
+    add_fact(
+        plugin, "common", "test:u", "别的群约定：周五晚点名",
+        common_scope="field", sid="test:gm:other",
+    )
+    event = make_event("看看小明")
+    out = asyncio.run(plugin.get_profile(event, subject="test:u"))
+    assert "别的群约定：周五晚点名" in out
+    assert "@" in out, "主动画像必须标出来源会话"
 
 
 def test_common_scope_round_trips_through_storage(tmp_path):
