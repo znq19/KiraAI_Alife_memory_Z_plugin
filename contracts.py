@@ -27,7 +27,31 @@ Category = Literal[
     "profile",
     "resource",
     "self",
+    # v2.22.25：世界知识/常识；仍走事实链路，只在注入时单独成块。
+    "common",
 ]
+CommonScope = Literal["", "world", "field"]
+
+def canonical_category(value):
+    """Normalize known model slips without silently accepting arbitrary values."""
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if cleaned in CATEGORY_ALIASES:
+            return CATEGORY_ALIASES[cleaned]
+        if cleaned in {
+            "event",
+            "fact",
+            "preference",
+            "commitment",
+            "relationship",
+            "profile",
+            "resource",
+            "self",
+            "common",
+        }:
+            return cleaned
+        return value.strip()
+    return value
 
 
 def relation_issue(relation):
@@ -97,6 +121,13 @@ CATEGORY_ALIASES = {
     "info": "fact",
     "personal": "profile",
     "identity": "profile",
+    "常识": "common",
+    "世界知识": "common",
+    "世界常识": "common",
+    "场域": "common",
+    "场域规则": "common",
+    "common knowledge": "common",
+    "world knowledge": "common",
 }
 
 
@@ -105,24 +136,8 @@ class Fact(Strict):
 
     @field_validator("category", mode="before")
     @classmethod
-    def canonical_category(cls, value):
-        if isinstance(value, str):
-            cleaned = value.strip().lower()
-            if cleaned in CATEGORY_ALIASES:
-                return CATEGORY_ALIASES[cleaned]
-            if cleaned in {
-                "event",
-                "fact",
-                "preference",
-                "commitment",
-                "relationship",
-                "profile",
-                "resource",
-                "self",
-            }:
-                return cleaned
-            return value.strip()
-        return value
+    def _canonical_category(cls, value):
+        return canonical_category(value)
 
     subject: Short
     content: Text
@@ -132,6 +147,8 @@ class Fact(Strict):
     relations: list[Relation] = Field(max_length=20)
     source_ids: list[Short] = Field(min_length=1, max_length=200)
     importance: int = Field(default=5, ge=1, le=10)
+    # 只有 common 有意义；空值按 world 处理（见 main.common_scope_of）。
+    common_scope: CommonScope = ""
 
 
 class FactMergeGroup(Strict):
@@ -209,6 +226,8 @@ class AuditAction(Strict):
     #   "keep 没带 content" 这种合乎提示词的输出判失败、白走一次重试 ✗（同 FactMergeGroup 的教训 ✓）
     content: Text = ""
     reason: Short
+    # v2.22.25：correct 可只改类别（不重写正文）；其他动作不允许带类别。
+    category: Category | None = None
     relations: list[Relation] | None = Field(default=None, max_length=20)
     importance: int | None = Field(default=None, ge=1, le=10)
     # 主体记错了就填这里（用条目里的 id）✗ 修正归属 —— 只对 correct 有意义，留空=不动主体
@@ -220,11 +239,19 @@ class AuditAction(Strict):
     # 应用侧会**拒绝据此提升 importance** ✗（不许自我强化）
     only_self: bool = False
 
+    @field_validator("category", mode="before")
+    @classmethod
+    def _canonical_category(cls, value):
+        return canonical_category(value) if value is not None else None
+
     @model_validator(mode="after")
     def validate_content(self):
-        # 只有真的会改写正文的动作才要 content ✓
+        # correct 可以只改 category；merge 仍必须有正文。
         if self.action in ("correct", "merge") and not self.content.strip():
-            raise ValueError("correct/merge requires content")
+            if not (self.action == "correct" and self.category):
+                raise ValueError("correct/merge requires content")
+        if self.category is not None and self.action != "correct":
+            raise ValueError("category is only allowed for correct")
         return self
 
 
@@ -493,6 +520,13 @@ class Settings(Strict):
     jev_models: list[str] = Field(default_factory=list)        # JEV 决策链路（有序 ✓ ≤10 ✓）
     jev_decision_models: list[str] = Field(default_factory=list)  # 决策模型回退链（3.1.1+ ✓）
     rerank_models: list[str] = Field(default_factory=list)     # 重排链路（有序 ✓ ≤10 ✓）
+
+    # ── v2.22.25：common 分块后，普通事实的小额补回（方案 B）──────────
+    # N 只统计主召回拆出的 common；轮换槽来的 common 本来就不占普通预算，不参与补回。
+    common_field_mode: Literal["allow", "filter", "lift"] = "allow"
+    common_compensate_enabled: bool = True
+    common_compensate_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
+    common_compensate_max: int = Field(default=5, ge=0, le=20)
 
     @model_validator(mode="after")
     def valid_merge_limits(self):

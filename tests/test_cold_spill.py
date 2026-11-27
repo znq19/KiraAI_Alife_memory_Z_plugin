@@ -333,6 +333,18 @@ def test_no_blocking_io_directly_in_async_handlers():
 
     src = (pathlib.Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
+    # ast.get_source_segment 每个节点都会重新切源码；main.py 很大 ⇒ 实测 ~9s。
+    # 预计算行偏移，语义一致但线性扫描。
+    _line_starts = [0]
+    for _line in src.splitlines(keepends=True):
+        _line_starts.append(_line_starts[-1] + len(_line))
+
+    def _segment(node):
+        return src[
+            _line_starts[node.lineno - 1] + node.col_offset:
+            _line_starts[node.end_lineno - 1] + node.end_col_offset
+        ]
+
     BLOCK = (
         "self.store.connect(", "sqlite3.connect(", "_cold.spill(", "_cold.restore(",
         "_cold.preview(", "_cold.stats(", "_cold.content_of(", "_cold.fill_contents(",
@@ -345,7 +357,7 @@ def test_no_blocking_io_directly_in_async_handlers():
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     continue          # 嵌套定义先跳过 ✓（它们可能在线程里被调用 ✓）
                 if isinstance(child, ast.Call):
-                    seg = ast.get_source_segment(src, child) or ""
+                    seg = _segment(child)
                     if any(b in seg for b in BLOCK):
                         bad.append("%s() 行 %d：%s" % (fn.name, child.lineno, seg[:56]))
                 walk(child)

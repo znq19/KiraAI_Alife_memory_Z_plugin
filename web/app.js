@@ -10,6 +10,7 @@ const labels = {
   profile: "人物画像",
   resource: "资源线索",
   self: "自我认知",
+  common: "常识/世界",
 };
 const fields = {
   compress_input_chars: "每批压缩输入预算（字符）",
@@ -56,6 +57,10 @@ const fields = {
   cold_archive_path: "冷归档库文件路径",
   cold_archive_auto: "冷归档自动执行",
   inject_budget_ms: "每轮注入时间预算（毫秒）",
+  common_field_mode: "场域常识跨会话",
+  common_compensate_enabled: "常识分块后补回普通事实",
+  common_compensate_ratio: "常识补回比例",
+  common_compensate_max: "常识补回上限（条）",
   permanent_dedupe_cross_threshold: "永久记忆跨会话去重阈值",
   fact_recall_min_score: "事实内容匹配门槛",
   recall_skip_media: "召回跳过表情/图片-only 消息",
@@ -1156,7 +1161,7 @@ function healthCard(f, idx) {
     : "";
   return (
     '<article class="card" data-hidx="' + idx + '" title="点击编辑这条事实">' +
-    '<div class="row"><span class="tag">' + esc(cat) + "</span><strong>" +
+    '<div class="row"><span class="tag">' + esc(cat) + "</span>" + commonScopeTag(f) + "<strong>" +
     esc(displayLabel(f.subject)) + "</strong></div>" +
     "<p>" + esc(f.content) + "</p>" +
     (tagLine ? "<small>" + esc(tagLine) + "</small>" : "") +
@@ -1198,12 +1203,18 @@ function selfFactMax() {
   return Number.isFinite(n) ? n : 6;
 }
 
+function commonScopeTag(f) {
+  if (!f || f.category !== "common") return "";
+  const label = f.common_scope === "field" ? "场域" : "世界";
+  return '<span class="tag">' + esc(label) + "</span>";
+}
+
 function renderFactCards(list) {
   $("#factCards").innerHTML = list.length
     ? list
         .map(
           (f, i) =>
-            `<article class="card"><div class="row"><span class="tag">${esc(labels[f.category])}</span>${f.self_fact ? '<span class="tag self-tag" title="这条事实的来源是助手自己（不是用户说的）">自我</span>' : ""}${f.recall_filtered ? '<span class="tag filt-tag" title="重要度 ≤ ' + (f.self_threshold ?? selfFactMax()) + ' 的自我事实不参与召回/被动注入；面板与主动检索仍可查">不参与召回</span>' : ""}<span class="tag imp${f.importance != null && Number(f.importance) <= selfFactMax() ? " imp-low" : ""}" title="重要度（1–10）：越高越优先常驻；bot 自己的事实若 ≤「自我认知事实召回门槛」则不参与召回 ✓">重要度 ${esc(f.importance == null ? "—" : String(f.importance))}</span><strong>${esc(displayLabel(f.subject))}</strong></div><p>${esc(f.content)}</p><small>${esc((f.tags || []).join(" · "))}</small>${f.rewrite_pending ? '<div class="notice">待整理 ' + esc(String(f.rewrite_attempts || 0)) + '/3：这条是「模型输出不可用 → 按时间拼接」的产物。下一轮审计会还原来源、重新合并；也可以点维护面板的「重整理待处理事实」立刻排队。</div>' : ""}${f.relation_warnings?.length ? '<div class="notice">待审校：' + esc(f.relation_warnings.map((w) => w.reason).join("；")) + "。该连线未用于关系召回。</div>" : ""}<p class="muted">${esc(f.reason ? "事实依据：" + f.reason : "")}${esc(f.scenario ? " · 场景：" + f.scenario : "")}</p>${f.edit_history?.length ? '<p class="muted">最近审校：' + esc(f.edit_history[0].reason) + " · " + date(f.edit_history[0].created) + "</p>" : ""}<footer><small>${(f.sources || []).length} 个来源</small><button data-fact="${i}">编辑事实</button></footer></article>`,
+            `<article class="card"><div class="row"><span class="tag">${esc(labels[f.category])}</span>${commonScopeTag(f)}${f.self_fact ? '<span class="tag self-tag" title="这条事实的来源是助手自己（不是用户说的）">自我</span>' : ""}${f.recall_filtered ? '<span class="tag filt-tag" title="重要度 ≤ ' + (f.self_threshold ?? selfFactMax()) + ' 的自我事实不参与召回/被动注入；面板与主动检索仍可查">不参与召回</span>' : ""}<span class="tag imp${f.importance != null && Number(f.importance) <= selfFactMax() ? " imp-low" : ""}" title="重要度（1–10）：越高越优先常驻；bot 自己的事实若 ≤「自我认知事实召回门槛」则不参与召回 ✓">重要度 ${esc(f.importance == null ? "—" : String(f.importance))}</span><strong>${esc(displayLabel(f.subject))}</strong></div><p>${esc(f.content)}</p><small>${esc((f.tags || []).join(" · "))}</small>${f.rewrite_pending ? '<div class="notice">待整理 ' + esc(String(f.rewrite_attempts || 0)) + '/3：这条是「模型输出不可用 → 按时间拼接」的产物。下一轮审计会还原来源、重新合并；也可以点维护面板的「重整理待处理事实」立刻排队。</div>' : ""}${f.relation_warnings?.length ? '<div class="notice">待审校：' + esc(f.relation_warnings.map((w) => w.reason).join("；")) + "。该连线未用于关系召回。</div>" : ""}<p class="muted">${esc(f.reason ? "事实依据：" + f.reason : "")}${esc(f.scenario ? " · 场景：" + f.scenario : "")}</p>${f.edit_history?.length ? '<p class="muted">最近审校：' + esc(f.edit_history[0].reason) + " · " + date(f.edit_history[0].created) + "</p>" : ""}<footer><small>${(f.sources || []).length} 个来源</small><button data-fact="${i}">编辑事实</button></footer></article>`,
         )
         .join("")
     : empty("画像还在形成");
@@ -1375,6 +1386,7 @@ async function openFact(row) {
   $("#factFields").innerHTML = [
     "subject",
     "category",
+    "common_scope",
     "importance",     // ★ 2026-10-10：补齐「重要度」——卡片与弹窗此前都没有 ✗
     "reason",
     "scenario",
@@ -1388,6 +1400,7 @@ async function openFact(row) {
           {
             subject: "实体",
             category: "分类",
+            common_scope: "常识作用域",
             importance: "重要度（1–10）",
             reason: "原因",
             scenario: "适用场景",
@@ -1409,6 +1422,25 @@ async function openFact(row) {
                   ">" +
                   n +
                   (n >= 7 ? "（优先常驻）" : "（≤ 自我认知门槛时会被挡下）") +
+                  "</option>",
+              )
+              .join("") +
+            "</select>"
+          : k === "common_scope"
+          ? '<select data-field="common_scope">' +
+            [
+              ["", "无（非 common）"],
+              ["world", "世界"],
+              ["field", "场域（仅当前会话）"],
+            ]
+              .map(
+                ([v, n]) =>
+                  '<option value="' +
+                  v +
+                  '" ' +
+                  ((row.common_scope || "") === v ? "selected" : "") +
+                  ">" +
+                  n +
                   "</option>",
               )
               .join("") +
@@ -2024,6 +2056,9 @@ function renderConfig(values) {
                     global: "全局 · 跨用户跨会话",
                     linked: "同参与者 · 关联会话",
                     session: "当前会话",
+                    allow: "允许 · 其他会话放普通事实块",
+                    filter: "仅当前会话 · 过滤其他会话",
+                    lift: "允许 · 跨会话也放进常识块",
                   }[v] || v,
                 ) +
                 "</option>",

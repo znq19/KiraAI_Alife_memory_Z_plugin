@@ -660,7 +660,13 @@ CATEGORY_CODES = {
     "profile": "pf",
     "resource": "rs",
     "self": "sf",
+    "common": "cm",
 }
+# 静态 system prompt 用：码表只出现一次，动态注入块不重复。
+CATEGORY_CODE_LEGEND = (
+    "类别码：ev=事件 fa=事实 pr=偏好 co=约定 re=关系 "
+    "pf=画像 rs=资源 sf=自我 cm=常识 rl=铁律"
+)
 # 记忆类别优先级：越小越"必须留在上下文里"（用于注入排序与裁剪）
 CATEGORY_RANK = {
     "rule": 0,
@@ -673,11 +679,6 @@ CATEGORY_RANK = {
     "fact": 7,
     "note": 8,
 }
-
-CATEGORY_LEGEND = "事实短码：" + " ".join(
-    f"{code}={name}" for name, code in CATEGORY_CODES.items()
-)
-
 
 def named_pair(entity_id, name=None):
     """``qq:769690776(周武)`` —— 稳定 ID 在前，名字在括号里。
@@ -920,7 +921,7 @@ def overlap_hit(text, reply, min_hits=2):
     return False
 
 
-def bot_facts(facts, current_sid="", short=None, self_id=""):
+def bot_facts(facts, current_sid="", short=None, self_id="", session_codes=None):
     """给 Bot 看的精简事实视图：只留判断与追溯必需的字段。
 
     内部簿记（fingerprint/deleted/revision/merge_pending/audited）、
@@ -945,6 +946,8 @@ def bot_facts(facts, current_sid="", short=None, self_id=""):
             item["rel"] = relations
         if fact.get("sid") and fact["sid"] != current_sid:
             item["sid"] = fact["sid"]
+            if session_codes:
+                item["from"] = session_codes.get(fact["sid"], fact["sid"])
             if fact.get("src_user"):
                 item["by"] = fact["src_user"]
         if self_id and fact.get("src_user") == self_id:
@@ -989,6 +992,9 @@ def bot_facts(facts, current_sid="", short=None, self_id=""):
             "relation_warnings"
         ):
             item["rev"] = True
+        if fact.get("category") == "common":
+            scope = str(fact.get("common_scope") or "world")
+            item["cs"] = "f" if scope == "field" else "w"
         view.append(item)
     return view
 
@@ -1062,7 +1068,6 @@ def bot_facts_grouped(facts, current_sid="", codes=None, self_id="", links=None)
     """
     codes = codes or {}
     groups = {}
-    ranks = {}
     for fact in facts or []:
         subject = str(fact.get("subject") or "")
         if not subject:
@@ -1071,12 +1076,12 @@ def bot_facts_grouped(facts, current_sid="", codes=None, self_id="", links=None)
         #   `links` 由后端一处算好（含结构化归一 + 人工绑定）✓ 这里只查表 ✓
         _base = codes.get(subject, subject)
         key = (links or {}).get(_base, _base)
-        groups.setdefault(key, []).append((CATEGORY_RANK.get(fact.get("category") or "", 99), _grouped_row(fact, codes, current_sid, self_id=self_id)))
-        ranks[key] = min(ranks.get(key, 99), CATEGORY_RANK.get(fact.get("category") or "", 99))
+        groups.setdefault(key, []).append(
+            _grouped_row(fact, codes, current_sid, self_id=self_id)
+        )
     out = {}
     for key in groups:  # 保持上游顺序（提到的人/高相关在前）
-        rows = [row for _, row in groups[key]]
-        out[key] = rows
+        out[key] = list(groups[key])
     return out
 
 
@@ -1232,14 +1237,10 @@ def short_names(names, codes):
     return table
 
 
-FACT_GROUP_LEGEND = (
-    "事实按主体分组：facts 的键是主体短码，组内每行 [类别, 内容, 重要性?, 关系?, 时间?, 谁说的?, self?]，"
-    "尾部省略；关系写作 主体>关系>客体，**省略主体即本组主体**（如 >朋友>小A）；短码与名字见 names（短码→[真实ID, 名字]）；"
-    "**末位 self 表示这条事实的最新来源是自己**——那是自己曾经说过的，不是外部证据，不可据此认定事实。"
+FACT_RELATION_RULE = (
+    "关系：主体>关系>客体；省略主体即本组主体；末位 self=自己曾经说过的，不是外部证据。"
 )
 
-
-CATEGORY_LEGEND = CATEGORY_LEGEND + "\n" + FACT_GROUP_LEGEND
 
 
 def archives_flat(value):
