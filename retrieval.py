@@ -660,7 +660,13 @@ CATEGORY_CODES = {
     "profile": "pf",
     "resource": "rs",
     "self": "sf",
+    "common": "cm",
 }
+# 静态 system prompt 用：码表只出现一次，动态注入块不重复。
+CATEGORY_CODE_LEGEND = (
+    "类别码：ev=事件 fa=事实 pr=偏好 co=约定 re=关系 "
+    "pf=画像 rs=资源 sf=自我 cm=常识 rl=铁律"
+)
 # 记忆类别优先级：越小越"必须留在上下文里"（用于注入排序与裁剪）
 CATEGORY_RANK = {
     "rule": 0,
@@ -989,6 +995,9 @@ def bot_facts(facts, current_sid="", short=None, self_id=""):
             "relation_warnings"
         ):
             item["rev"] = True
+        if fact.get("category") == "common":
+            scope = str(fact.get("common_scope") or "world")
+            item["cs"] = "f" if scope == "field" else "w"
         view.append(item)
     return view
 

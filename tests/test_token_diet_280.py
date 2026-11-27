@@ -37,7 +37,7 @@ def test_category_codes_cover_every_category():
 
     schema_categories = {
         "event", "fact", "preference", "commitment",
-        "relationship", "profile", "resource", "self",
+        "relationship", "profile", "resource", "self", "common",
     }
     assert set(r.CATEGORY_CODES) == schema_categories
     assert all(len(code) == 2 for code in r.CATEGORY_CODES.values())

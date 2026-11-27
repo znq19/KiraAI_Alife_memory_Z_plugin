@@ -288,6 +288,7 @@ class Store:
               id TEXT PRIMARY KEY, sid TEXT NOT NULL, category TEXT NOT NULL, subject TEXT NOT NULL,
               content TEXT NOT NULL, reason TEXT NOT NULL, scenario TEXT NOT NULL, tags TEXT NOT NULL,
               relations TEXT NOT NULL, sources TEXT NOT NULL, fingerprint TEXT NOT NULL,
+              common_scope TEXT NOT NULL DEFAULT '',
               deleted INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1,
               audited REAL NOT NULL DEFAULT 0, importance INTEGER NOT NULL DEFAULT 5,
               merge_pending INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL DEFAULT 0,
@@ -520,6 +521,10 @@ class Store:
                 db.execute(
                     "UPDATE facts SET created=coalesce((SELECT max(r.start) FROM records r,"
                     " json_each(facts.sources) s WHERE r.id=s.value),0)"
+                )
+            if "common_scope" not in fact_columns:
+                db.execute(
+                    "ALTER TABLE facts ADD COLUMN common_scope TEXT NOT NULL DEFAULT ''"
                 )
             # 依赖新增列的索引要放在迁移**之后**建：老库要先补齐列，
             # 否则这一步直接 `no such column`（v2.13.0 的线上事故就出在这）
@@ -2219,6 +2224,11 @@ class Store:
             return result
 
     def _add_fact(self, db, sid, fact):
+        _scope = str(fact.get("common_scope") or "")
+        if str(fact.get("category") or "") == "common":
+            _scope = "field" if _scope == "field" else "world"
+        else:
+            _scope = ""
         fingerprint = hashlib.sha256(
             dump(
                 [
@@ -2243,15 +2253,19 @@ class Store:
             tags = sorted(set(json.loads(old["tags"]) + fact["tags"]))
             db.execute(
                 "UPDATE facts SET sources=?,tags=?,importance=MAX(importance,?),"
+                "common_scope=CASE WHEN ?<>'' THEN ? ELSE common_scope END,"
                 "revision=revision+1 WHERE id=?",
-                (dump(sources), dump(tags), int(fact.get("importance", 5)), old["id"]),
+                (
+                    dump(sources), dump(tags), int(fact.get("importance", 5)),
+                    _scope, _scope, old["id"],
+                ),
             )
             return old["id"]
         new_id = uid()
         db.execute(
             """INSERT INTO facts(id,sid,category,subject,content,reason,scenario,tags,
-           relations,sources,fingerprint,importance,created)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           relations,sources,fingerprint,importance,created,common_scope)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 new_id,
                 sid,
@@ -2266,6 +2280,7 @@ class Store:
                 fingerprint,
                 int(fact.get("importance", 5)),
                 time.time(),  # created = 入库时刻（不是事件时间 ✗）
+                _scope,
             ),
         )
         # 事件时间区间：取来源记录的时间跨度（没有来源就留 0）
@@ -4481,6 +4496,17 @@ class Store:
                 for k in group
             ):
                 raise ValueError("cross-scope merge is forbidden")
+            common_scopes = {
+                ("field" if str(rows[k]["common_scope"] or "") == "field" else "world")
+                for k in group
+                if str(rows[k]["category"] or "") == "common"
+            }
+            if len(common_scopes) > 1:
+                raise ValueError("cross common_scope merge is forbidden")
+            common_scope = (
+                next(iter(common_scopes)) if common_scopes
+                else str(target["common_scope"] or "")
+            )
             if new_sid and len({rows[k]["sid"] for k in group}) > 1:
                 target_sid = new_sid
             else:
@@ -4512,8 +4538,8 @@ class Store:
             ends = [b for _, b in spans if b] or starts
             db.execute(
                 "UPDATE facts SET sid=?,content=?,sources=?,tags=?,relations=?,"
-                "importance=?,merge_pending=0,fingerprint=?,event_at=?,event_end=?,"
-                "revision=revision+1 WHERE id=?",
+                "importance=?,common_scope=?,merge_pending=0,fingerprint=?,"
+                "event_at=?,event_end=?,revision=revision+1 WHERE id=?",
                 (
                     target_sid,
                     content,
@@ -4521,6 +4547,7 @@ class Store:
                     dump(tags),
                     dump(list(relations.values())),
                     importance,
+                    common_scope,
                     uid(),
                     min(starts),
                     max(ends),
@@ -4554,7 +4581,10 @@ class Store:
     def audit(self, candidates, output, job_id=""):
         by_id = {r["id"]: r for r in candidates}
         validate_audit(candidates, output)
-        counts = {"keep": 0, "correct": 0, "merge": 0, "retract": 0, "merged_facts": 0}
+        counts = {
+            "keep": 0, "correct": 0, "merge": 0, "retract": 0,
+            "merged_facts": 0, "category_fixed": 0,
+        }
         clamped = 0   # v2.18.9：自我来源想提权、被压回原值的次数 ✓
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -4649,10 +4679,23 @@ class Store:
                 # 模型给了用模型的 ✓ 没给就沿用并集 ✓（老格式回答照样能过 ✓）
                 if a.get("tags") is not None:
                     tags = sorted({str(t).strip() for t in a["tags"] if str(t).strip()})
+                # v2.22.25：correct 可只改 category；空 content 表示保留原文。
+                new_category = old["category"]
+                if a["action"] == "correct" and a.get("category"):
+                    new_category = a["category"]
+                    if new_category != old["category"]:
+                        counts["category_fixed"] += 1
+                new_content = a["content"] if str(a["content"]).strip() else old["content"]
+                new_scope = str(old["common_scope"] or "")
+                if new_category == "common" and not new_scope:
+                    new_scope = "world"
                 db.execute(
-                    "UPDATE facts SET content=?,sources=?,relations=?,tags=?,fingerprint=?,revision=revision+1 WHERE id=?",
+                    "UPDATE facts SET category=?,common_scope=?,content=?,sources=?,"
+                    "relations=?,tags=?,fingerprint=?,revision=revision+1 WHERE id=?",
                     (
-                        a["content"],
+                        new_category,
+                        new_scope,
+                        new_content,
                         dump(sources),
                         dump(list(relations.values())),
                         dump(tags),

@@ -47,8 +47,11 @@ def test_compact_schemas_do_not_contradict_the_instruction():
         "compress 的必填清单漏了 importance（指令写着九个键都要有）✗"
     )
     audit = e.COMPACT_SCHEMAS["audit"]
-    assert "correct/merge 必填 content" in audit, (
+    assert "correct/merge 一般要 content" in audit, (
         "audit 的 content 只在改写正文时才需要 ✗"
+    )
+    assert "只改 category 时 content 留空" in audit, (
+        "audit 应允许仅修正分类，不强迫重写正文 ✗"
     )
     assert "可省" not in audit, (
         "声明里不能写「可省」✗ —— 那等于给模型一个偷懒去选 keep/retract 的台阶"

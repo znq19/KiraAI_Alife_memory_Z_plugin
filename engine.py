@@ -59,12 +59,13 @@ COMMON_INSTRUCTION = (
 )
 
 AUDIT_INSTRUCTION = (
-    "审计输出只含actions，禁 summary/facts；target_id/source_ids 取自 facts[].id，"
-    "不是evidence[].id。这三者的 source_ids 只能是[target_id]；"
-    "merge 至少两条同会话同主体同分类事实，每条只参与一次操作。"
-    "证据里**没提到** != 事实错误 ✗：只有证据与事实**矛盾**才 correct；看不到就当 keep，别删别改。"
-    "无操作时 actions=[]；保留否定/时间/不确定；不同事件不因相似合并。"
+    "审计只输出 actions；target_id/source_ids 取 facts[].id（非 evidence）；"
+    "source_ids 只能是[target_id]；"
+    "merge 至少两条同会话同主体同分类，每条一次。"
+    "证据里没提到 ≠ 事实错误：只有证据与事实**矛盾**才 correct；看不到就当 keep，别删改。"
+    "无操作 actions=[]；保留否定/时间/不确定；不同事件不因相似合并。"
     "correct 给 relations（无=[]，不改=null）；importance 1-10 按证据给：1-2 仅当时有效，9-10 不应遗忘。"
+    "correct 可改 category；只改类别 content 留空；其他动作不得带 category。"
     "subject 记错（A 的话记到 B 名下）用 correct：evidence[].sp 是原文**说话人显示名**，不符就把 subject 填成正确的**实体 id**（照 facts[].subject）；没有 sp 或看不出是谁说的就别改主体。"
     "retract 清理被推翻或冗余的事实：软删后可恢复；reason 写清原因。"
     # v2.18.9 回声防线：**以用户为准** ✓
@@ -134,9 +135,11 @@ COMPACT_SCHEMAS = {
         ' "facts": [{"category": "<枚举见上>", "subject": str, "content": str,\n'
         '            "reason": str, "scenario": str, "tags": [str],\n'
         '            "relations": [{"subject","predicate","object"}],\n'
-        '            "source_ids": [str], "importance": 1-10}]}\n'
+        '            "source_ids": [str], "importance": 1-10,\n'
+        '            "common_scope": "world|field"?}]}\n'
         '**只有这两个顶层键**（summary、facts）—— 不要回写输入里的 range/records/names 等字段 ✗\n'
         '必填：summary；facts 里 category/subject/content/reason/scenario/tags/relations/source_ids/importance。\n'
+        'common_scope 只在 category=common 时填：world=世界知识，field=仅当前会话的场域规则；缺省按 world。\n'
         '上限：facts ≤{facts_cap}、content ≤60 字、reason ≤40 字、scenario ≤20 字、summary ≤300 字。\n'
         '字段白名单：只允许上面出现过的键，多任何一个都会被拒。\n'
         '常见错误（会被拒）：把 predicate/object 平铺进事实（必须放 relations）；\n'
@@ -149,7 +152,8 @@ COMPACT_SCHEMAS = {
         '            "facts": [{"category": str, "subject": str, "content": str,\n'
         '                       "reason": str, "scenario": str, "tags": [str],\n'
         '                       "relations": [{"subject","predicate","object"}],\n'
-        '                       "source_ids": [str], "importance": 1-10}]?,\n'
+        '                       "source_ids": [str], "importance": 1-10,\n'
+        '                       "common_scope": "world|field"?}]?,\n'
         '            "keep_content": str?, "reason": str}]}\n'
         '**只有 items 一个顶层键** —— 不要回写输入的 cap/budget/who 等字段 ✗\n'
         '必填：id（逐字复制 p1/p2…）、action、reason。\n'
@@ -157,7 +161,8 @@ COMPACT_SCHEMAS = {
         'keep_content（仅 split 用，≤16000 字，只留必须每轮在场的那段约束）。\n'
         'facts[].source_ids **逐字填这条记忆自己的 id**（p1/p2…）；subject 用 who 表的稳定实体 ID。\n'
          '**keep/archive 不给 facts**（前者每轮在场、后者不再需要）。'
-         'facts[].category 只能是 event/fact/preference/commitment/relationship/profile/resource/self；'
+         'facts[].category 只能是 event/fact/preference/commitment/relationship/profile/resource/self/common；'
+         'common 只有世界知识/常识/场域规则；common_scope=world|field。'
          'content ≤60 字、reason ≤40 字、scenario ≤20 字。'
          '所有自然语言字段一律用**中文**（category 除外）。\n'
         '上限：items ≤50、category ≤40 字、reason ≤40 字。\n'
@@ -190,11 +195,13 @@ COMPACT_SCHEMAS = {
         '返回 JSON（无 markdown、无额外字段）：\n'
         '{"actions": [{"action": "keep|correct|merge|retract", "target_id": str,\n'
         '              "source_ids": [str], "content": str?, "reason": str, "importance": 1-10,\n'
-        '              "relations": [{"subject","predicate","object"}],\n'
+        '              "category": str?, "relations": [{"subject","predicate","object"}],\n'
         '              "subject": str?, "tags": [str]?, "only_self": bool?}]}\n'
         '必填：actions；每项 action/target_id/source_ids/reason；'
-        'correct/merge 必填 content。\n'
-        '可选：importance / relations / subject（改主体）/ tags（内容变了才给）/ only_self。\n'
+        'correct/merge 一般要 content；correct 只改 category 时 content 留空（保留原文）。\n'
+        '可选：category（仅 correct；event/fact/preference/commitment/relationship/'
+        'profile/resource/self/common）、importance / relations / subject（改主体）/ '
+        'tags（内容变了才给）/ only_self。\n'
         '上限：reason ≤40 字。字段白名单：只允许上面这些键（含可选），别的键会被拒。\n'
         '常见错误（会被拒）：目标 id 不在输入里；keep/correct/retract 却给了别的 id；\n'
         '编造 target_id 或 source_ids。'
@@ -256,9 +263,12 @@ def build_instruction(purpose, cfg, forced=False, facts_cap=None):
             "summary 不超过 300 字。scenario 不超过 20 字（写清场景即可，不要展开）。"
             "每条事实的 content 不超过 60 字，把话说完、别写段落。"
             "facts[] 每条字段：category（只能是 "
-            "event/fact/preference/commitment/relationship/profile/resource/self）"
+            "event/fact/preference/commitment/relationship/profile/resource/self/common）"
             "、subject、content、reason、scenario、tags、relations、source_ids、importance，"
-            "九个键都要有；tags 与 relations 没有内容就给空数组 []。"
+            "上述九个键都要有；common_scope 仅 common 可选；tags 与 relations 没有内容就给空数组 []。"
+            "common=脱离当前对话仍成立、可复用的世界知识/常识/规则/当前事实；"
+            "common 必须给 common_scope（world=世界知识，field=仅当前会话/平台的场域规则，缺省 world）。"
+            "普通个人经历不要归 common。"
             "relations 必须是数组，每项 {subject,predicate,object}；"
             "不要把 predicate/object 平铺在事实里；谓词要表达具体关系"
             "（如 朋友/姐姐/喜欢），不要用 认为/觉得/说。"
@@ -2820,6 +2830,7 @@ class Engine:
                 facts.append(
                     {
                         "category": fact["category"],
+                        "common_scope": str(fact.get("common_scope") or ""),
                         "subject": await self.id_for_subject(fact.get("subject", ""), names),
                         "content": fact["content"],
                         "reason": str(fact.get("reason") or "")[:2000],
