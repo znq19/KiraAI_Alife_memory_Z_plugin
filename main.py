@@ -2807,6 +2807,8 @@ class AlifeMemoryPlugin(BasePlugin):
                         sid: _codes.get(sid, sid) for sid in _sids
                     }
                     if _sids:
+                        for sid in _sids:
+                            session_names[_session_codes.get(sid, sid)] = sid
                         for ent in await self.store.call(
                             "entities", ids=list(_sids), limit=max(1, len(_sids))
                         ):
