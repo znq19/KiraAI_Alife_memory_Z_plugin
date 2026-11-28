@@ -288,7 +288,8 @@ def test_prompt_budget_is_enforced():
     # v2.18.9 只上调 AUDIT：560→620 ✓（COMMON 靠瘦身不涨）
     # 2026-11-27：AUDIT 增 category 完整枚举（避免模型输出非法类别后重试）；
     # 这是**安全枚举**，不是无意义膨胀，预算 620→700。
-    assert len(texts["COMMON_INSTRUCTION"]) <= 620, "COMMON 超预算 %d" % len(texts["COMMON_INSTRUCTION"])
+    # 2026-11-29：新增 common 来源门槛与 tool 语义，安全预算 620→740。
+    assert len(texts["COMMON_INSTRUCTION"]) <= 740, "COMMON 超预算 %d" % len(texts["COMMON_INSTRUCTION"])
     assert len(texts["AUDIT_INSTRUCTION"]) <= 700, "AUDIT 超预算 %d" % len(texts["AUDIT_INSTRUCTION"])
     # 2026-09-23：口径修正后 MEMORY_RULES 的真实长度（含 _GROUPED_FACT_DOC 拼接 ✓）
     # 同日精简去重（next_batch 原说 3 遍、expand 说明 2 遍、简报格式三句并一句）⇒ 767 → 680

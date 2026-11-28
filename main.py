@@ -8,7 +8,9 @@ import inspect
 import json
 import math
 import random
+import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import HTTPException, Request
@@ -138,7 +140,9 @@ NEIGHBOR_VERB_PREDICATES = {
 
 COMMON_CATEGORY = "common"
 _GROUPED_RULES = (
-    _GROUPED_FACT_DOC + FACT_RELATION_RULE + "\n" + CATEGORY_CODE_LEGEND + "\n"
+    _GROUPED_FACT_DOC + FACT_RELATION_RULE + "\n"
+    + CATEGORY_CODE_LEGEND + "\n"
+    + "来源：U=用户 T=工具读取 A=助手自述。\n"
 )
 _COMMON_RULE = (
     "【常识】块是世界知识/场域规则，仍按事实读；※只是标识；"
@@ -168,6 +172,128 @@ def common_block_candidate(fact, sid, cfg):
     if str((fact or {}).get("sid") or "") == str(sid):
         return True
     return str(getattr(cfg, "common_field_mode", "allow")) == "lift"
+
+TOOL_SELF_READ = {
+    "SearchMemoryArchive", "GetProfile", "MemoryOverview",
+    "search_memory_archive", "get_profile", "memory_overview",
+}
+TOOL_ACTION = {
+    "Memorize", "CorrectMemory", "memorize", "correct_memory",
+}
+
+def classify_tool(name):
+    """Conservative tool source classification; unknown never supports common."""
+    name = str(name or "").strip()
+    low = name.casefold()
+    if name in TOOL_SELF_READ or low in {x.casefold() for x in TOOL_SELF_READ}:
+        return "read_self"
+    if name in TOOL_ACTION or low in {x.casefold() for x in TOOL_ACTION}:
+        return "action"
+    if any(x in low for x in (
+        "search", "web", "fetch", "http", "browser", "crawl",
+        "read_file", "readfile", "read", "query", "url",
+    )):
+        return "read_external"
+    return "unknown"
+
+def _optional_tool_call_hook(priority=Priority.LOW):
+    """3.1.x has no ON_TOOL_CALL; keep the handler as a plain method there."""
+    decorator = getattr(on, "tool_call", None)
+    if decorator is None:
+        return lambda fn: fn
+    return decorator(priority=priority)
+
+MIDFLIGHT_START = "[[MIDFLIGHT_INBOX_START]]"
+MIDFLIGHT_END = "[[MIDFLIGHT_INBOX_END]]"
+_MIDFLIGHT_RE = re.compile(
+    re.escape(MIDFLIGHT_START) + r"(.*?)" + re.escape(MIDFLIGHT_END),
+    re.S,
+)
+_MIDFLIGHT_GROUP_RE = re.compile(
+    r"^\[([^\]]+)\] \[message_id: ([^\]]*)\] "
+    r"\[group_name: (.*?) group_id: ([^\s\]]*) "
+    r"user_nickname: (.*?)(?:, group_nickname: (.*?))?, user_id: ([^\]]*)\] "
+    r"\| (.*)$"
+)
+_MIDFLIGHT_DM_RE = re.compile(
+    r"^\[([^\]]+)\] \[message_id: ([^\]]*)\] "
+    r"\[user_nickname: (.*?), user_id: ([^\]]*)\] \| (.*)$"
+)
+_MIDFLIGHT_NOTICE_RE = re.compile(
+    r"^\[([^\]]+)\] Notice \[user_id: ([^\]]*)\] \| (.*)$"
+)
+
+def _date_ts(value):
+    try:
+        return datetime.strptime(value.strip(), "%b %d %Y %H:%M %a").timestamp()
+    except Exception:
+        return time.time()
+
+def parse_midflight(text):
+    """Parse official-format lines inside the marker.
+
+    Only exact lines are accepted.  Anything else is ignored and the caller
+    falls back to the old tool-result behavior.
+    """
+    blocks = _MIDFLIGHT_RE.findall(str(text or ""))
+    if not blocks:
+        return []
+    out = []
+    for raw in blocks:
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("（以上是任务途中收到的新消息"):
+                continue
+            m = _MIDFLIGHT_GROUP_RE.match(line)
+            if m:
+                date, mid, gname, gid, nick, card, uid, content = m.groups()
+                out.append({
+                    "role": "user",
+                    "message_id": mid,
+                    "time": _date_ts(date),
+                    "speaker": nick or card or uid,
+                    "speaker_id": uid,
+                    "users": [uid] if uid else [],
+                    "content": content,
+                    "source_kind": "user",
+                    "category": "midflight",
+                    "group_id": gid,
+                    "group_name": gname,
+                })
+                continue
+            m = _MIDFLIGHT_DM_RE.match(line)
+            if m:
+                date, mid, nick, uid, content = m.groups()
+                out.append({
+                    "role": "user",
+                    "message_id": mid,
+                    "time": _date_ts(date),
+                    "speaker": nick or uid,
+                    "speaker_id": uid,
+                    "users": [uid] if uid else [],
+                    "content": content,
+                    "source_kind": "user",
+                    "category": "midflight",
+                })
+                continue
+            m = _MIDFLIGHT_NOTICE_RE.match(line)
+            if m:
+                date, uid, content = m.groups()
+                out.append({
+                    "role": "user",
+                    "message_id": "",
+                    "time": _date_ts(date),
+                    "speaker": uid,
+                    "speaker_id": uid,
+                    "users": [uid] if uid else [],
+                    "content": content,
+                    "source_kind": "user",
+                    "category": "midflight",
+                })
+    return out
+
+def strip_midflight(text):
+    return _MIDFLIGHT_RE.sub("", str(text or "")).strip()
 
 MEMORY_RULES = (
     "你具有持续的分层记忆。用户消息里的 alife_memory（m 字段是记忆简报）"
@@ -288,6 +414,8 @@ def brief(perception):
                             bits.append(str(row[3]))
                         if len(row) > 4 and row[4]:
                             bits.append(str(row[4]))
+                        if len(row) > 5 and row[5]:
+                            bits.append(str(row[5]))
                         lines.append("%s %s" % (code, " ".join(bits)))
             else:                                 # 扁平视图 ✓
                 for row in raw_facts:
@@ -681,6 +809,8 @@ class AlifeMemoryPlugin(BasePlugin):
         self._access_seen = {}
         self._memo = {}
         self._prewarm_seen = {}
+        # 工具调用名 → 来源类型；on_tool_result 无 tool_call_id，按事件顺序消费。
+        self._tool_call_meta = {}
         # 轮换槽位：每个会话一批「相关但还没召回过的」记忆（v2.15.0）
         self.rotation = {}
         # v2.18.19：**最近一次清单**的序号表 ✓（每会话一份 ✓ 每次召回重建 ✓）
@@ -988,6 +1118,13 @@ class AlifeMemoryPlugin(BasePlugin):
                 logger.info(
                     "[记忆·Z] 发现 %s 条历史「降级拼接」事实，已排入重做队列", marked
                 )
+            if str(await self.store.call("get_state", "common_source_gate") or "") != "1":
+                fixed = await self.store.call("sanitize_common_sources")
+                await self.store.call("set_state", "common_source_gate", "1")
+                if fixed:
+                    logger.info(
+                        "[记忆·Z] 存量 common 来源修复：%d 条无有效来源已降级", fixed
+                    )
         except Exception as exc:
             logger.warning("[记忆·Z] 历史拼接事实回填标记失败（下次启动会重试）：%s", exc)
         # ★ 2026-10-11：存量配置**一次性**迁移（只调整"自我认知"那两个键 ✓ 别的一律不碰 ✓）
@@ -2997,6 +3134,9 @@ class AlifeMemoryPlugin(BasePlugin):
         cfg = self.runtime_settings()
         if not cfg.enabled:
             return
+        # midflight steer 模式：消息已进入当前 request.messages，先还原成 user 记录。
+        if cfg.capture_enabled:
+            await self._capture_steer_midflight(event, req)
         # Adapters may finish connecting after startup; retry pending merges once.
         if not self.identity_settled:
             self.identity_settled = True
@@ -4167,9 +4307,12 @@ class AlifeMemoryPlugin(BasePlugin):
                         #   （bot 要能引用来源 ✓ 集成测试钉着这一点 ✓）
                         src = ("[%s]" % row["src"]) if row.get("src") else ""
                         from_sid = ("@" + str(row["from"])) if row.get("from") else ""
+                        src_tag = {
+                            "user": "[U]", "assistant": "[A]", "tool": "[T]",
+                        }.get(str(row.get("src_kind") or ""), "")
                         out_lines.append(
-                            ("%s %s｜%s %s %s %s%s" % (
-                                cat, who, body, mark, when, src, from_sid,
+                            ("%s %s %s｜%s %s %s %s%s" % (
+                                src_tag, cat, who, body, mark, when, src, from_sid,
                             )).replace("  ", " ").strip()
                         )
                 if prof.get("rel"):
@@ -4234,6 +4377,54 @@ class AlifeMemoryPlugin(BasePlugin):
         # {c,u,x} 列表，两种形态都没有 id；旧实现因此永远取不到 id。
         return text
 
+    async def _capture_midflight_text(self, event, text):
+        """Parse marker user messages and store them as normal user records."""
+        messages = parse_midflight(text)
+        for msg in messages:
+            await self.store.call(
+                "capture",
+                event.sid,
+                "midflight:" + (msg.get("message_id") or hashlib.sha256(
+                    str(text).encode()
+                ).hexdigest()),
+                [msg],
+            )
+        return len(messages)
+
+    async def _capture_steer_midflight(self, event, req):
+        """Steer messages arrive in request.messages; capture them before model."""
+        for message in getattr(req, "messages", None) or []:
+            role = getattr(message, "role", None)
+            if role != "user":
+                continue
+            content = getattr(message, "content", "")
+            if isinstance(content, list):
+                text = "\n".join(
+                    str(part.get("text") or "")
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
+            else:
+                text = str(content or "")
+            if MIDFLIGHT_START in text:
+                await self._capture_midflight_text(event, text)
+
+    @_optional_tool_call_hook(priority=Priority.LOW)
+    async def on_tool_call(self, ctx, *_):
+        """记录工具名对应的来源类型；on_tool_result 没有 tool_call_id，按序消费。"""
+        try:
+            event = getattr(ctx, "event", None)
+            sid = str(getattr(event, "sid", "") or "")
+            eid = str(getattr(event, "event_id", "") or "")
+            key = eid + "|" + sid
+            name = str(getattr(getattr(ctx, "tool", None), "name", "") or "")
+            bucket = self._tool_call_meta.setdefault(key, [])
+            bucket.append(classify_tool(name))
+            if len(bucket) > 32:
+                del bucket[:-32]
+        except Exception:
+            logger.debug("[记忆·Z] 工具来源分类跳过", exc_info=True)
+
     @on.tool_result(priority=Priority.LOW)
     async def on_tool_result(self, event, result, *_):
         if not self.runtime_settings().enabled or not self.settings.capture_enabled:
@@ -4249,9 +4440,28 @@ class AlifeMemoryPlugin(BasePlugin):
         if digest in self._own_outputs:
             self._own_outputs.discard(digest)
             return
+        # Midflight 注入的用户消息：主 LLM 仍看到原始 text；记忆侧另存 user。
+        mid_messages = parse_midflight(text)
+        clean_text = strip_midflight(text) if mid_messages else text
+        detached = bool(mid_messages)
+        if mid_messages:
+            for msg in mid_messages:
+                await self.store.call(
+                    "capture",
+                    event.sid,
+                    "midflight:" + (msg.get("message_id") or digest),
+                    [msg],
+                )
+        _tool_key = str(event.event_id) + "|" + str(event.sid)
+        _bucket = self._tool_call_meta.get(_tool_key) or []
+        _tool_kind = _bucket.pop(0) if _bucket else "unknown"
+        if not _bucket:
+            self._tool_call_meta.pop(_tool_key, None)
+        # 记忆自己的工具载荷（SearchMemoryArchive/GetProfile）不进 tool 记录；
+        # 但其中夹带的 midflight 用户消息已经在上方单独保存。
         if looks_like_memory_payload(text):
             return
-        text = capture_text(text)  # 工具返回里若夹带协议外壳，也不该进记忆
+        text = capture_text(clean_text)
         if not text:
             return
         key = str(event.event_id) + ":tool:" + digest
@@ -4267,9 +4477,16 @@ class AlifeMemoryPlugin(BasePlugin):
                     "summary": TOOL_RESULT_PREFIX + tool_preview(text),
                     "time": time.time(),
                     "users": user_ids(event),
+                    "source_kind": "tool",
+                    "tool_kind": _tool_kind,
                 }
             ],
         )
+        if detached:
+            logger.debug(
+                "[记忆·Z] midflight 还原 %d 条用户消息；工具记录已去标记",
+                len(mid_messages),
+            )
 
     async def accessible(self, event, record_id, include_deleted=False):
         if not self.runtime_settings().enabled:

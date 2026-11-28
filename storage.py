@@ -39,6 +39,31 @@ SEARCH_INDEX_SCHEME = "2"
 CAPTURE_SCRUB_VERSION = "2"
 
 
+def infer_source_kind(role, content, source_kind="", tool_kind=""):
+    """Return ``(source_kind, tool_kind)`` for legacy and new records.
+
+    Old records before v2.23 have no source columns; role + tool-result prefix
+    are the only safe fallback. Unknown tool kind is never treated as verified.
+    """
+    kind = str(source_kind or "")
+    tool = str(tool_kind or "")
+    if kind in {"user", "assistant", "tool"}:
+        return kind, tool
+    if str(role or "") == "user":
+        return "user", ""
+    if str(content or "").lstrip().startswith("工具感知结果："):
+        return "tool", tool
+    if str(role or "") == "assistant":
+        return "assistant", ""
+    return "", tool
+
+def source_supports_common(source_kind, tool_kind=""):
+    """user or external read-tool only; self-read/action/assistant do not."""
+    kind = str(source_kind or "")
+    if kind == "user":
+        return True
+    return kind == "tool" and str(tool_kind or "") == "read_external"
+
 class Conflict(ValueError):
     pass
 
@@ -278,7 +303,9 @@ class Store:
               active INTEGER NOT NULL DEFAULT 1, deleted INTEGER NOT NULL DEFAULT 0,
               revision INTEGER NOT NULL DEFAULT 1, permanent INTEGER NOT NULL DEFAULT 0,
               position INTEGER NOT NULL, event_key TEXT UNIQUE, created REAL NOT NULL,
-              importance INTEGER NOT NULL DEFAULT 0);
+              importance INTEGER NOT NULL DEFAULT 0,
+              source_kind TEXT NOT NULL DEFAULT '',
+              tool_kind TEXT NOT NULL DEFAULT '');
             CREATE INDEX IF NOT EXISTS record_context ON records(sid,active,deleted,level DESC,position);
             CREATE INDEX IF NOT EXISTS record_time ON records(level,start,end);
             CREATE TABLE IF NOT EXISTS edges (
@@ -439,6 +466,13 @@ class Store:
                 #   现在独立成块、独立执行 ✓（幂等 ✓）
                 db.execute(
                     "ALTER TABLE records ADD COLUMN speaker_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "source_kind" not in columns:
+                db.execute(
+                    "ALTER TABLE records ADD COLUMN source_kind TEXT NOT NULL DEFAULT ''"
+                )
+                db.execute(
+                    "ALTER TABLE records ADD COLUMN tool_kind TEXT NOT NULL DEFAULT ''"
                 )
             if "rotate_shown" not in columns:
                 db.execute(
@@ -1214,9 +1248,11 @@ class Store:
         with self.connect() as db:
             try:
                 rows = [
-                    (r["id"], r["start"], r["users"], r["speaker_id"])
+                    (r["id"], r["start"], r["users"], r["speaker_id"],
+                     r["source_kind"], r["tool_kind"], r["role"], r["content"])
                     for r in db.execute(
-                        "SELECT id,start,users,speaker_id FROM records WHERE id IN"
+                        "SELECT id,start,users,speaker_id,source_kind,tool_kind,role,content "
+                        "FROM records WHERE id IN"
                         " (SELECT value FROM json_each(?))",
                         (dump(sorted(sources)),),
                     )
@@ -1230,23 +1266,49 @@ class Store:
                     "（不影响功能 ✓ 下次启动会自动补列 ✓）"
                 )
                 rows = [
-                    (r["id"], r["start"], r["users"], "")
+                    (r["id"], r["start"], r["users"], "",
+                     "", "", r["role"], r["content"])
                     for r in db.execute(
-                        "SELECT id,start,users FROM records WHERE id IN"
+                        "SELECT id,start,users,role,content FROM records WHERE id IN"
                         " (SELECT value FROM json_each(?))",
                         (dump(sorted(sources)),),
                     )
                 ]
-        meta = {r[0]: (r[1] or 0, r[2] or "", r[3] or "") for r in rows}
+        def _kind(role, content, source_kind="", tool_kind=""):
+            if source_kind:
+                return str(source_kind), str(tool_kind or "")
+            if str(role or "") == "user":
+                return "user", ""
+            if str(content or "").lstrip().startswith("工具感知结果："):
+                return "tool", str(tool_kind or "")
+            if str(role or "") == "assistant":
+                return "assistant", ""
+            return "", ""
+
+        meta = {}
+        for r in rows:
+            kind, tool_kind = _kind(
+                r[6] if len(r) > 6 else "",
+                r[7] if len(r) > 7 else "",
+                r[4] if len(r) > 4 else "",
+                r[5] if len(r) > 5 else "",
+            )
+            meta[r[0]] = (
+                r[1] or 0, r[2] or "", r[3] or "", kind, tool_kind,
+            )
         for fact in facts:
             best = None
             for source in fact.get("sources", []):
-                start, _users, speaker_id = meta.get(source, (0, "", ""))
+                start, _users, speaker_id, kind, tool_kind = meta.get(
+                    source, (0, "", "", "", "")
+                )
                 if best is None or start >= best[0]:
-                    best = (start, source, speaker_id)
+                    best = (start, source, speaker_id, kind, tool_kind)
             if best:
                 fact["src"] = best[1]
                 fact["src_user"] = best[2] or ""      # ★ 真正的发言人 id ✓（未知 ⇒ 空 ✓）
+                fact["src_kind"] = best[3] or ""
+                fact["src_tool_kind"] = best[4] or ""
         return facts
 
     def observe_name(
@@ -1523,11 +1585,15 @@ class Store:
                 pos += 1
                 # The summary is what reaches the model; content keeps the full text.
                 summary = msg.get("summary") or msg["content"]
+                _source_kind = str(
+                    msg.get("source_kind")
+                    or ("user" if msg["role"] == "user" else "assistant")
+                )
                 db.execute(
                     """INSERT OR IGNORE INTO records
                   (id,sid,role,level,start,end,summary,content,users,speaker,speaker_id,
-                   position,event_key,created,search_body,category)
-                  VALUES (?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   position,event_key,created,search_body,category,source_kind,tool_kind)
+                  VALUES (?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         uid(),
                         sid,
@@ -1551,6 +1617,8 @@ class Store:
                         # v2.18.9：category="media" = 只有表情/图片的消息 ✓
                         # 数据照留（不丢 ✓）但默认不进召回 ✗（描述平均 276 字符，纯噪音）
                         str(msg.get("category") or ""),
+                        _source_kind,
+                        str(msg.get("tool_kind") or ""),
                     ),
                 )
             self.bump(db)
@@ -2223,16 +2291,107 @@ class Store:
                 ]
             return result
 
+    def sanitize_common_sources(self):
+        """One-shot repair: old/legacy common facts without valid sources.
+
+        Existing facts written before source tracking may have assistant-only
+        evidence.  They must not keep being injected as common just because
+        their category was already ``common``.  Downgrade them to self/fact;
+        never delete content or sources.
+        """
+        changed = 0
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM facts WHERE deleted=0 AND category='common'"
+            ).fetchall()
+            if not rows:
+                return 0
+            src_ids = set()
+            parsed = {}
+            for row in rows:
+                try:
+                    vals = set(json.loads(row["sources"] or "[]"))
+                except Exception:
+                    vals = set()
+                parsed[row["id"]] = vals
+                src_ids.update(vals)
+            meta = {}
+            ordered = list(src_ids)
+            for start in range(0, len(ordered), 500):
+                chunk = ordered[start:start + 500]
+                for r in db.execute(
+                    "SELECT id,role,content,source_kind,tool_kind FROM records "
+                    "WHERE id IN (%s)" % ",".join("?" * len(chunk)),
+                    tuple(chunk),
+                ):
+                    meta[r["id"]] = infer_source_kind(
+                        r["role"], r["content"], r["source_kind"], r["tool_kind"]
+                    )
+            for row in rows:
+                kinds = [meta.get(x, ("", "")) for x in parsed.get(row["id"], ())]
+                if any(source_supports_common(k, t) for k, t in kinds):
+                    continue
+                new_cat = (
+                    "self" if kinds and all(k == "assistant" for k, _t in kinds)
+                    else "fact"
+                )
+                db.execute(
+                    "INSERT INTO versions(kind,target,snapshot,reason,created) "
+                    "VALUES ('fact',?,?,?,?)",
+                    (row["id"], dump(dict(row)), "common source gate", time.time()),
+                )
+                db.execute(
+                    "UPDATE facts SET category=?,common_scope='',revision=revision+1 "
+                    "WHERE id=?",
+                    (new_cat, row["id"]),
+                )
+                changed += 1
+            if changed:
+                self.bump(db)
+        if changed:
+            logger.info(
+                "[记忆·Z] common 来源门槛：%d 条旧 common 无有效来源，已降级保留",
+                changed,
+            )
+        return changed
+
     def _add_fact(self, db, sid, fact):
+        _cat = str(fact.get("category") or "")
+        _source_ids = [str(x) for x in (fact.get("source_ids") or []) if x]
+        if _cat == "common":
+            source_rows = []
+            if _source_ids:
+                source_rows = db.execute(
+                    "SELECT role,content,source_kind,tool_kind FROM records "
+                    "WHERE id IN (SELECT value FROM json_each(?))",
+                    (dump(_source_ids),),
+                ).fetchall()
+            sources = [
+                infer_source_kind(
+                    r["role"], r["content"], r["source_kind"], r["tool_kind"]
+                )
+                for r in source_rows
+            ]
+            if not any(source_supports_common(k, t) for k, t in sources):
+                # common 不能靠 bot 自述/工具动作成立；降级为普通事实。
+                _all_assistant = bool(sources) and all(
+                    k == "assistant" for k, _t in sources
+                )
+                _cat = "self" if _all_assistant else "fact"
+                logger.info(
+                    "[记忆·Z] common 来源不足（%s）⇒ 降级 %s",
+                    ",".join("%s/%s" % x for x in sources) or "无来源",
+                    _cat,
+                )
         _scope = str(fact.get("common_scope") or "")
-        if str(fact.get("category") or "") == "common":
+        if _cat == "common":
             _scope = "field" if _scope == "field" else "world"
         else:
             _scope = ""
         fingerprint = hashlib.sha256(
             dump(
                 [
-                    fact[k]
+                    _cat if k == "category" else fact[k]
                     for k in (
                         "category",
                         "subject",
@@ -2252,12 +2411,12 @@ class Store:
             sources = sorted(set(json.loads(old["sources"]) + fact["source_ids"]))
             tags = sorted(set(json.loads(old["tags"]) + fact["tags"]))
             db.execute(
-                "UPDATE facts SET sources=?,tags=?,importance=MAX(importance,?),"
-                "common_scope=CASE WHEN ?<>'' THEN ? ELSE common_scope END,"
+                "UPDATE facts SET category=?,sources=?,tags=?,"
+                "importance=MAX(importance,?),common_scope=?,"
                 "revision=revision+1 WHERE id=?",
                 (
-                    dump(sources), dump(tags), int(fact.get("importance", 5)),
-                    _scope, _scope, old["id"],
+                    _cat, dump(sources), dump(tags), int(fact.get("importance", 5)),
+                    _scope, old["id"],
                 ),
             )
             return old["id"]
@@ -2269,7 +2428,7 @@ class Store:
             (
                 new_id,
                 sid,
-                fact["category"],
+                _cat,
                 fact["subject"],
                 fact["content"],
                 fact["reason"],
@@ -4512,6 +4671,26 @@ class Store:
             else:
                 target_sid = target["sid"]
             sources = sorted({s for k in group for s in json.loads(rows[k]["sources"])})
+            _merge_cat = str(target["category"])
+            if _merge_cat == "common":
+                _meta = []
+                if sources:
+                    _meta = [
+                        infer_source_kind(
+                            r["role"], r["content"], r["source_kind"], r["tool_kind"]
+                        )
+                        for r in db.execute(
+                            "SELECT role,content,source_kind,tool_kind FROM records "
+                            "WHERE id IN (SELECT value FROM json_each(?))",
+                            (dump(sources),),
+                        )
+                    ]
+                if not any(source_supports_common(k, t) for k, t in _meta):
+                    _merge_cat = (
+                        "self" if _meta and all(k == "assistant" for k, _t in _meta)
+                        else "fact"
+                    )
+                    common_scope = ""
             tags = sorted({t for k in group for t in json.loads(rows[k]["tags"])})
             # v2.18.9：合并后标签不贴切了就该能改 ✗ 没给就沿用并集 ✓
             if tags_override is not None:
@@ -4537,10 +4716,11 @@ class Store:
             starts = [a for a, _ in spans if a] or [float(rows[target_id]["event_at"] or 0)]
             ends = [b for _, b in spans if b] or starts
             db.execute(
-                "UPDATE facts SET sid=?,content=?,sources=?,tags=?,relations=?,"
+                "UPDATE facts SET category=?,sid=?,content=?,sources=?,tags=?,relations=?,"
                 "importance=?,common_scope=?,merge_pending=0,fingerprint=?,"
                 "event_at=?,event_end=?,revision=revision+1 WHERE id=?",
                 (
+                    _merge_cat,
                     target_sid,
                     content,
                     dump(sources),
@@ -4583,7 +4763,7 @@ class Store:
         validate_audit(candidates, output)
         counts = {
             "keep": 0, "correct": 0, "merge": 0, "retract": 0,
-            "merged_facts": 0, "category_fixed": 0,
+            "merged_facts": 0, "category_fixed": 0, "category_rejected": 0,
         }
         clamped = 0   # v2.18.9：自我来源想提权、被压回原值的次数 ✓
         with self.connect() as db:
@@ -4596,6 +4776,7 @@ class Store:
             }
             # v2.18.9：周围上下文也算证据 ✓ 用来判断"审计是不是看得到用户那一侧" ✓
             bot_only = set()
+            source_meta = {}
             if source_ids:
                 # ⚠️ 分批查：老 SQLite 的变量上限是 999 ✗ 一批里来源可能上千 ✓
                 # 超限会直接 OperationalError → 审计任务整体失败 ✗（防御性分批 ✓）
@@ -4603,10 +4784,14 @@ class Store:
                 for start in range(0, len(ordered), 500):
                     chunk = ordered[start : start + 500]
                     rows = db.execute(
-                        "SELECT id,role FROM records WHERE id IN (%s)"
-                        % ",".join("?" * len(chunk)),
+                        "SELECT id,role,content,source_kind,tool_kind FROM records "
+                        "WHERE id IN (%s)" % ",".join("?" * len(chunk)),
                         tuple(chunk),
                     ).fetchall()
+                    for r in rows:
+                        source_meta[r[0]] = infer_source_kind(
+                            r[1], r[2], r[3], r[4]
+                        )
                     bot_only |= {
                         r[0] for r in rows if str(r[1] or "") == "assistant"
                     }
@@ -4682,7 +4867,21 @@ class Store:
                 # v2.22.25：correct 可只改 category；空 content 表示保留原文。
                 new_category = old["category"]
                 if a["action"] == "correct" and a.get("category"):
-                    new_category = a["category"]
+                    _wanted_cat = a["category"]
+                    if _wanted_cat == "common":
+                        _srcs = by_id[a["target_id"]].get("sources") or []
+                        _kinds = [
+                            source_meta.get(x, ("", ""))
+                            for x in _srcs
+                        ]
+                        if not any(source_supports_common(k, t) for k, t in _kinds):
+                            counts["category_rejected"] += 1
+                            logger.info(
+                                "[记忆·Z] 审计拒绝 bot-only/action 升 common：%s",
+                                a["target_id"],
+                            )
+                            _wanted_cat = old["category"]
+                    new_category = _wanted_cat
                     if new_category != old["category"]:
                         counts["category_fixed"] += 1
                 new_content = a["content"] if str(a["content"]).strip() else old["content"]
