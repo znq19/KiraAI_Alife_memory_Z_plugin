@@ -56,6 +56,9 @@ COMMON_INSTRUCTION = (
     "认为/觉得/说不是关系，观点的说话者不是关系主体；关系与画像须有原文证据，没有证据时 relations=[]。"
     # v2.18.9 回声防线：助手自己的发言不是关于世界的证据 ✓
     "records[].bot=1=助手自己说的（非用户）✗ 不可当世界事实证据，只能记「我说过/答应过」；与用户冲突以用户为准。"
+    "只有 bot 自述、没有用户/工具读取来源的陈述，不得归 common；归 self/fact。"
+    "records[].tool=1=工具返回，不是助手自述；工具写入/执行不算独立知识来源；"
+    "同一个 bot 回答重复多次不算多个独立来源。"
 )
 
 AUDIT_INSTRUCTION = (
@@ -268,6 +271,7 @@ def build_instruction(purpose, cfg, forced=False, facts_cap=None):
             "、subject、content、reason、scenario、tags、relations、source_ids、importance，"
             "上述九个键都要有；common_scope 仅 common 可选；tags 与 relations 没有内容就给空数组 []。"
             "common=脱离当前对话仍成立、可复用的世界知识/常识/规则/当前事实；"
+            "common 必须有用户或工具读取来源；只有 bot 自述、没有独立来源的不得归 common。"
             "common 必须给 common_scope（world=世界知识，field=仅当前会话/平台的场域规则，缺省 world）。"
             "普通个人经历不要归 common。"
             "relations 必须是数组，每项 {subject,predicate,object}；"

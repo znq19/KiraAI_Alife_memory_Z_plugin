@@ -958,6 +958,10 @@ def bot_facts(facts, current_sid="", short=None, self_id="", session_codes=None)
         if source:
             # 短码映射里没有的（例如 sources 兜底值）就用原值，绝不输出 null
             item["src"] = (short(source) or source) if short else source
+        if fact.get("src_kind"):
+            item["src_kind"] = fact["src_kind"]
+            if fact.get("src_tool_kind"):
+                item["src_tool_kind"] = fact["src_tool_kind"]
         created = fact.get("created")
         # 事件时间（这条事实讲的事发生在什么时候）优先；老数据没有 event_at 时退回 created。
         created = fact.get("created")
@@ -1043,6 +1047,14 @@ def _grouped_row(fact, codes, current_sid, self_id=""):
     who = speaker
     if room and current_sid and room != current_sid:
         who = "%s@%s" % (speaker, codes.get(room, room)) if speaker else "@" + codes.get(room, room)
+    kind = str(fact.get("src_kind") or "")
+    if not kind:
+        kind = "assistant" if (self_id and fact.get("src_user") == self_id) else (
+            "user" if speaker else ""
+        )
+    tag = {"user": "[U]", "assistant": "[A]", "tool": "[T]"}.get(kind, "")
+    if tag:
+        who = (tag + " " + who).strip()
     row.append(who)
 
     # v2.18.9 回声防线：本条事实的**最新来源是助手自己** → 末尾打 self 旗标 ✓

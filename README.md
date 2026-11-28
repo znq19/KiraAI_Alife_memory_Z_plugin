@@ -475,6 +475,16 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
 - 成本杠杆 ✓：`compress_model`（可指便宜模型）+ 限流 + 幂等键（轮末记录 id ✓）
 - **明确不做** ✗：命中就调模型 ✗；让启发式**直接写永久记忆** ✗（会绕过审计/合并/去重 ✓）
 
+### v2.23.0 —— 来源可信度 + 中途插话还原 ✓
+
+- **来源体系**：records 增加 `source_kind=user|assistant|tool` 与 `tool_kind=read_external|read_self|action`；旧库自动迁移，旧记录按 role/工具前缀安全推断。
+- **common 服务端门槛**：`common` 必须有 `user` 或 `tool:read_external` 来源；只有 bot 自述、`read_self`、`tool:action` 的 common 一律降级为 self/fact；旧 common 启动时一次性修复，原文保留。
+- **审计/合并**：审计拒绝 assistant-only 升 common；合并保留来源并重新检查，全 assistant 结果降级。
+- **提示词**：保留原 `bot=1` 回声防线，补 common 来源门槛与 tool 语义；事实块使用 `[U]/[T]/[A]` 来源标签 + 说话人/会话，静态图例。
+- **Midflight**：兼容 `[[MIDFLIGHT_INBOX_START]]` / `[[MIDFLIGHT_INBOX_END]]`（midflight v1.5.0，默认开）；按官方格式解析 `message_id/user_id/nickname/group_id/content`，还原为正常 user 记录；主 LLM 保留标记，记忆副本去掉标记，插话顺序按 marker 行序。
+- **不新增** `verified_at/as_of/TTL`；沿用现有时间字段。
+- 版本 2.22.25 → 2.23.0。
+
 ### v2.22.25 —— 常识记忆 + 图例 + 审计归类 ✓
 
 - **图例补齐**：`MEMORY_RULES` 的 grouped 规则增加类别码表（`cm=常识`、`rl=铁律`）；flat 视图不加，避免浪费；静态文本不改变每轮动态块与缓存前缀。

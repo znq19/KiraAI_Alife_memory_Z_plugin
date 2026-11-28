@@ -1,5 +1,16 @@
 # 验证记录
 
+## 2.23.0（2026-11-29）
+
+- records 增加 `source_kind=user|assistant|tool`、`tool_kind=read_external|read_self|action`；旧库自动迁移，旧记录按 role/工具前缀推断。
+- common 服务端来源门槛：仅 user/tool:read_external 可支撑 common；assistant-only、read_self、action 均降级；旧 common 启动一次性修复。
+- 审计拒绝 assistant-only 升 common；合并保留来源并复查。
+- Midflight marker `[[MIDFLIGHT_INBOX_START]]` / `[[MIDFLIGHT_INBOX_END]]`：主 LLM 可见，记忆侧解析成 user 记录/干净 tool 记录；顺序与媒体走官方格式，异常 fallback。
+- 事实来源标签 `[U]/[T]/[A]` + 说话人/会话；不新增 verified_at/as_of/TTL。
+- KiraAI **3.2.0-beta.1**：`1127 passed + 16 subtests`，0 failed。
+- KiraAI **3.1.2**：`1127 passed + 16 subtests`，0 failed。
+- KiraAI **3.3.0**：`1127 passed + 16 subtests`，0 failed。
+
 ## 2.22.25（2026-11-27）
 
 - 新增 `common` 常识分类与 `common_scope=world|field`；被动注入独立 `【常识】` 块，普通 facts 不重复；`common_field_mode=allow|filter|lift`（默认 allow）控制其他会话 field 的展示/过滤/拎出；主动画像跨会话行带 `@会话` 与 `会话码：xxx=会话名` 图例。

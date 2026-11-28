@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import os
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -64,9 +65,29 @@ def build_plugin(tmp_path, **settings):
 
 
 def add_fact(plugin, category, subject, content, *, sid=SID,
-             importance=8, common_scope="", evidence="当时的一句闲聊"):
-    rid = plugin.store.memorize(sid, evidence, ["test:u"], 1.0, 1.0)
+             importance=8, common_scope="", evidence="当时的一句闲聊",
+             source_kind="user", tool_kind=""):
+    key = "test-src-%s" % time.time_ns()
+    plugin.store.capture(
+        sid, key,
+        [{
+            "role": "user" if source_kind == "user" else "assistant",
+            "content": evidence,
+            "time": time.time(),
+            "users": ["test:u"],
+            "speaker": "小明",
+            "speaker_id": "test:u",
+            "source_kind": source_kind,
+            "tool_kind": tool_kind,
+        }],
+    )
     with plugin.store.connect() as db:
+        row = db.execute(
+            "SELECT id FROM records WHERE sid=? AND event_key LIKE ? "
+            "ORDER BY position DESC LIMIT 1",
+            (sid, sid + ":" + key + ":%"),
+        ).fetchone()
+        rid = row["id"] if row else ""
         plugin.store._add_fact(
             db,
             sid,
@@ -120,6 +141,7 @@ def test_common_world_facts_are_split_and_not_category_capped(tmp_path):
     assert "【常识｜世界】※" in block
     for i in range(5):
         assert "cm 世界常识%d：模型版本会变化" % i in block
+    assert "[U]" in block
     assert "小明喜欢茶" in block
     assert "【事实】" in block
     # 不重复：同一条 common 不应同时出现在普通 facts 区域
@@ -280,7 +302,104 @@ def test_get_profile_marks_cross_session_common_source(tmp_path):
     out = asyncio.run(plugin.get_profile(event, subject="test:u"))
     assert "别的群约定：周五晚点名" in out
     assert "@" in out, "主动画像必须标出来源会话"
+    assert "[U]" in out
     assert "会话码：" in out and "别的群" in out, "短码必须有可解析的会话名图例"
+
+
+def test_common_source_gate_accepts_user_and_external_tool_only(tmp_path):
+    plugin = build_plugin(tmp_path)
+    add_fact(plugin, "common", "世界", "用户常识", source_kind="user")
+    add_fact(
+        plugin, "common", "世界", "外部工具常识",
+        source_kind="tool", tool_kind="read_external",
+    )
+    add_fact(
+        plugin, "common", "世界", "自我工具常识",
+        source_kind="tool", tool_kind="read_self",
+    )
+    add_fact(
+        plugin, "common", "世界", "动作工具常识",
+        source_kind="tool", tool_kind="action",
+    )
+    add_fact(plugin, "common", "世界", "bot 自述常识", source_kind="assistant")
+    rows = plugin.store.facts(SID, limit=20)
+    cats = {row["content"]: row["category"] for row in rows}
+    assert cats["用户常识"] == "common"
+    assert cats["外部工具常识"] == "common"
+    assert cats["自我工具常识"] != "common"
+    assert cats["动作工具常识"] != "common"
+    assert cats["bot 自述常识"] != "common"
+
+
+def test_audit_rejects_assistant_only_common_category(tmp_path):
+    plugin = build_plugin(tmp_path)
+    add_fact(plugin, "fact", "世界", "bot 自述的事实", source_kind="assistant")
+    fact = plugin.store.facts(SID, limit=10)[0]
+    result = plugin.store.audit(
+        [fact],
+        {
+            "actions": [{
+                "action": "correct",
+                "target_id": fact["id"],
+                "source_ids": [fact["id"]],
+                "content": "",
+                "category": "common",
+                "reason": "尝试归类",
+            }]
+        },
+    )
+    after = plugin.store.facts_by_ids([fact["id"]])[0]
+    assert after["category"] == "fact"
+    assert result["category_rejected"] == 1
+
+
+def test_tool_reader_is_classified_as_external(tmp_path):
+    import types as _types
+    import core.agent.tool as tool_module
+
+    plugin = build_plugin(tmp_path)
+    event = make_event("查一下")
+    ctx = _types.SimpleNamespace(
+        event=event, tool=_types.SimpleNamespace(name="web_search")
+    )
+    asyncio.run(plugin.on_tool_call(ctx))
+    result = tool_module.ToolResult(text="网页结果：...")
+    asyncio.run(plugin.on_tool_result(event, result))
+    row = next(r for r in plugin.store.active(SID) if r["role"] == "assistant")
+    assert row["source_kind"] == "tool"
+    assert row["tool_kind"] == "read_external"
+
+
+def test_midflight_marker_is_visible_and_parsed_into_user_records(tmp_path):
+    import core.agent.tool as tool_module
+
+    plugin = build_plugin(tmp_path)
+    event = make_event("看看插话")
+    text = (
+        "工具感知结果：\n搜索结果：...\n"
+        "[[MIDFLIGHT_INBOX_START]]\n"
+        "[Nov 20 2026 14:30 Thu] [message_id: qq-abc] "
+        "[group_name: 测试群 group_id: 123 "
+        "user_nickname: 周武, user_id: 456] | 以后周五要点名 "
+        "[Image 一只猫, file_path: data/x.jpg]\n"
+        "（以上是任务途中收到的新消息。回复规则：……）\n"
+        "[[MIDFLIGHT_INBOX_END]]"
+    )
+    result = tool_module.ToolResult(text=text)
+    asyncio.run(plugin.on_tool_result(event, result))
+    # 主 LLM 看到的 tool_result 不被改写
+    assert result.text == text
+    records = plugin.store.active(SID)
+    assert records
+    assert [r["role"] for r in records] == ["user", "assistant"]
+    user = next(r for r in records if r["role"] == "user")
+    assert user["source_kind"] == "user"
+    assert user["speaker_id"] == "456"
+    assert user["content"].startswith("以后周五要点名")
+    assert "file_path: data/x.jpg" in user["content"]
+    tool_row = next(r for r in records if r["role"] == "assistant")
+    assert tool_row["source_kind"] == "tool"
+    assert "MIDFLIGHT_INBOX" not in tool_row["content"]
 
 
 def test_common_scope_round_trips_through_storage(tmp_path):
