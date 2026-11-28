@@ -3134,6 +3134,8 @@ class AlifeMemoryPlugin(BasePlugin):
         cfg = self.runtime_settings()
         if not cfg.enabled:
             return
+        # midflight steer 模式：消息已进入当前 request.messages，先还原成 user 记录。
+        await self._capture_steer_midflight(event, req)
         # Adapters may finish connecting after startup; retry pending merges once.
         if not self.identity_settled:
             self.identity_settled = True
@@ -4373,6 +4375,38 @@ class AlifeMemoryPlugin(BasePlugin):
         # 不能在这是从打包后的 value["facts"] 取 id：grouped 是 dict、flat 是
         # {c,u,x} 列表，两种形态都没有 id；旧实现因此永远取不到 id。
         return text
+
+    async def _capture_midflight_text(self, event, text):
+        """Parse marker user messages and store them as normal user records."""
+        messages = parse_midflight(text)
+        for msg in messages:
+            await self.store.call(
+                "capture",
+                event.sid,
+                "midflight:" + (msg.get("message_id") or hashlib.sha256(
+                    str(text).encode()
+                ).hexdigest()),
+                [msg],
+            )
+        return len(messages)
+
+    async def _capture_steer_midflight(self, event, req):
+        """Steer messages arrive in request.messages; capture them before model."""
+        for message in getattr(req, "messages", None) or []:
+            role = getattr(message, "role", None)
+            if role != "user":
+                continue
+            content = getattr(message, "content", "")
+            if isinstance(content, list):
+                text = "\n".join(
+                    str(part.get("text") or "")
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
+            else:
+                text = str(content or "")
+            if MIDFLIGHT_START in text:
+                await self._capture_midflight_text(event, text)
 
     @_optional_tool_call_hook(priority=Priority.LOW)
     async def on_tool_call(self, ctx, *_):

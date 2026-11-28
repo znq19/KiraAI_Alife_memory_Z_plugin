@@ -7,9 +7,10 @@
 - 审计拒绝 assistant-only 升 common；合并保留来源并复查。
 - Midflight marker `[[MIDFLIGHT_INBOX_START]]` / `[[MIDFLIGHT_INBOX_END]]`：主 LLM 可见，记忆侧解析成 user 记录/干净 tool 记录；顺序与媒体走官方格式，异常 fallback。
 - 事实来源标签 `[U]/[T]/[A]` + 说话人/会话；不新增 verified_at/as_of/TTL。
-- KiraAI **3.2.0-beta.1**：`1127 passed + 16 subtests`，0 failed。
-- KiraAI **3.1.2**：`1127 passed + 16 subtests`，0 failed。
-- KiraAI **3.3.0**：`1127 passed + 16 subtests`，0 failed。
+- KiraAI **3.2.0-beta.1**：`1128 passed + 16 subtests`，0 failed。
+- KiraAI **3.1.2**：`1128 passed + 16 subtests`，0 failed。
+- KiraAI **3.3.0**：`1128 passed + 16 subtests`，0 failed。
+- KiraAI **3.4.0（最新）**：`1128 passed + 16 subtests`，0 failed。
 
 ## 2.22.25（2026-11-27）
 

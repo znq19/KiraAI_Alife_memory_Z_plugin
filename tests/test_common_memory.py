@@ -353,6 +353,29 @@ def test_audit_rejects_assistant_only_common_category(tmp_path):
     assert result["category_rejected"] == 1
 
 
+def test_steer_marker_in_request_is_captured_as_user(tmp_path):
+    plugin = build_plugin(tmp_path)
+    event = make_event("正常消息")
+    marker = (
+        "[[MIDFLIGHT_INBOX_START]]\n"
+        "[Nov 20 2026 14:30 Thu] [message_id: steer-1] "
+        "[user_nickname: 老汤圆, user_id: 789] | steer 插话\n"
+        "[[MIDFLIGHT_INBOX_END]]"
+    )
+    req = LLMRequest(
+        messages=[OpenAIMessage(role="user", content=marker)],
+        system_prompt=[Prompt("稳定", name="stable")],
+        user_prompt=[Prompt("正常消息", name="message")],
+    )
+    asyncio.run(plugin.on_request(event, req))
+    user = next(r for r in plugin.store.active(SID) if r["role"] == "user")
+    assert user["source_kind"] == "user"
+    assert user["speaker_id"] == "789"
+    assert user["content"] == "steer 插话"
+    # 主 LLM 的 request 内容不被改写
+    assert req.messages[0].content == marker
+
+
 def test_tool_reader_is_classified_as_external(tmp_path):
     import types as _types
     import core.agent.tool as tool_module
