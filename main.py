@@ -3135,7 +3135,8 @@ class AlifeMemoryPlugin(BasePlugin):
         if not cfg.enabled:
             return
         # midflight steer 模式：消息已进入当前 request.messages，先还原成 user 记录。
-        await self._capture_steer_midflight(event, req)
+        if cfg.capture_enabled:
+            await self._capture_steer_midflight(event, req)
         # Adapters may finish connecting after startup; retry pending merges once.
         if not self.identity_settled:
             self.identity_settled = True
